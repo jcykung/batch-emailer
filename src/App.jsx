@@ -546,106 +546,42 @@ export default function App() {
             return;
         }
 
-        const sanitizedClassName = currentClass.name.replace(/[^a-zA-Z0-9-_]/g, '_');
-        const documentTitle = `${sanitizedClassName}_Report_${new Date().toISOString().split('T')[0]}`;
-
-        const printWindow = window.open('', '_blank');
-        if (!printWindow) {
-            showAlert("Popup Blocked", "Popup blocker active. Please allow popups to save/print report.");
-            return;
-        }
-
-        const contactsHtml = classStudents.map(student => {
-            const cleanEmails = (student.emails || []).filter(Boolean);
-            const emailsList = cleanEmails.length > 0
-                ? cleanEmails.map(e => `<li style="margin-bottom: 2px; word-break: break-all;">${e}</li>`).join('')
-                : '<span style="color: #94a3b8; font-style: italic;">No emails</span>';
-
-            const historyHtml = (student.emailHistory && student.emailHistory.length > 0)
-                ? student.emailHistory.map(log => `
-            <div style="margin-bottom: 6px; padding-bottom: 4px; border-bottom: 1px dashed #e2e8f0; font-size: 10.5px;">
-              <div style="font-weight: 600; font-size: 8px; color: #94a3b8; margin-bottom: 1px;">${formatDate(log.timestamp)}</div>
-              <div style="white-space: pre-wrap; color: #0f172a; line-height: 1.35;">${log.message}</div>
-            </div>
-          `).join('')
-                : '<span style="color: #94a3b8; font-style: italic; font-size: 9px;">No communication history</span>';
-
-            return `
-        <tr style="border-bottom: 1px solid #cbd5e1; page-break-inside: avoid;">
-          <td style="padding: 6px 8px; font-weight: 500; font-size: 9.5px; color: #334155; border-right: 1px solid #cbd5e1; vertical-align: top;">${student.name}</td>
-          <td style="padding: 6px 8px; border-right: 1px solid #cbd5e1; font-size: 9px; color: #475569; vertical-align: top;">
-            <ul style="margin: 0; padding-left: 0; list-style-type: none;">${emailsList}</ul>
-          </td>
-          <td style="padding: 6px 8px; color: #475569; border-right: 1px solid #cbd5e1; font-size: 9px; vertical-align: top;">${student.notes || '-'}</td>
-          <td style="padding: 6px 8px; vertical-align: top;">${historyHtml}</td>
-        </tr>
-      `;
-        }).join('');
-
-        const htmlContent = `
-      <html>
-        <head>
-          <title>${documentTitle}</title>
-          <style>
-            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; padding: 20px; color: #1e293b; font-size: 10px; line-height: 1.35; }
-            h1 { margin: 0 0 2px 0; font-size: 18px; color: #e0466a; font-weight: 700; letter-spacing: -0.02em; }
-            h2 { margin: 0 0 16px 0; font-size: 10px; font-weight: 500; color: #64748b; }
-            table { width: 100%; border-collapse: collapse; margin-top: 10px; table-layout: fixed; }
-            th { background-color: #f8fafc; padding: 6px 8px; text-align: left; border: 1px solid #cbd5e1; font-weight: 600; color: #475569; font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em; }
-            td { border: 1px solid #cbd5e1; vertical-align: top; }
-          </style>
-        </head>
-        <body>
-          <h1>${currentClass.name} - Contacts & Logs Report</h1>
-          <h2>Generated on ${new Date().toLocaleString()} | Total Contacts: ${classStudents.length}</h2>
-          <table>
-            <thead>
-              <tr>
-                <th style="width: 12%;">Contact Name</th>
-                <th style="width: 16%;">Email Addresses</th>
-                <th style="width: 12%;">Notes</th>
-                <th style="width: 60%;">Expanded Log History</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${contactsHtml}
-            </tbody>
-          </table>
-          <script>
-            window.onload = function() {
-              window.print();
+        // 1. Create a print stylesheet to hide page layout & reveal only the report root during print
+        const style = document.createElement('style');
+        style.id = 'print-report-style';
+        style.innerHTML = `
+            @media print {
+                /* Hide main application frame */
+                body > div:not(#print-report-root) {
+                    display: none !important;
+                }
+                #print-report-root {
+                    display: block !important;
+                    width: 100% !important;
+                    margin: 0 !important;
+                    padding: 10px !important;
+                    background-color: #ffffff !important;
+                    color: #0f172a !important;
+                }
+                #print-report-root table {
+                    width: 100% !important;
+                    table-layout: fixed !important;
+                    border-collapse: collapse !important;
+                }
+                #print-report-root th {
+                    background-color: #f8fafc !important;
+                    -webkit-print-color-adjust: exact !important;
+                    print-color-adjust: exact !important;
+                    color: #475569 !important;
+                }
             }
-          </script>
-        </body>
-      </html>
-    `;
+        `;
+        document.head.appendChild(style);
 
-        printWindow.document.write(htmlContent);
-        printWindow.document.close();
-    };
-
-    const handleSavePDF = async () => {
-        if (!currentClass || classStudents.length === 0) {
-            showAlert("Cannot Generate PDF", "No contacts available to generate a PDF.");
-            return;
-        }
-
-        const sanitizedClassName = currentClass.name.replace(/[^a-zA-Z0-9-_]/g, '_');
-        const filename = `${sanitizedClassName}_Report_${new Date().toISOString().split('T')[0]}.pdf`;
-
-        // Container must be in-viewport for html2canvas to capture it.
-        // Position it fixed at top-left, behind all other content.
-        const pdfContainer = document.createElement('div');
-        pdfContainer.style.position = 'fixed';
-        pdfContainer.style.left = '0';
-        pdfContainer.style.top = '0';
-        pdfContainer.style.width = '800px';
-        pdfContainer.style.zIndex = '-1';
-        pdfContainer.style.backgroundColor = '#ffffff';
-        pdfContainer.style.padding = '20px';
-        pdfContainer.style.color = '#1e293b';
-        pdfContainer.style.fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
-        pdfContainer.style.pointerEvents = 'none';
+        // 2. Create the printing container in the main document DOM
+        const printContainer = document.createElement('div');
+        printContainer.id = 'print-report-root';
+        printContainer.style.display = 'none'; // Hidden during normal on-screen usage
 
         const contactsHtml = classStudents.map(student => {
             const cleanEmails = (student.emails || []).filter(Boolean);
@@ -674,7 +610,7 @@ export default function App() {
       `;
         }).join('');
 
-        pdfContainer.innerHTML = `
+        printContainer.innerHTML = `
           <h1 style="margin: 0 0 2px 0; font-size: 18px; color: #e0466a; font-weight: 700; letter-spacing: -0.02em; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">${currentClass.name} - Contacts & Logs Report</h1>
           <h2 style="margin: 0 0 16px 0; font-size: 10px; font-weight: 500; color: #64748b; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">Generated on ${new Date().toLocaleString()} | Total Contacts: ${classStudents.length}</h2>
           <table style="width: 100%; border-collapse: collapse; margin-top: 10px; table-layout: fixed; border: 1px solid #cbd5e1; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
@@ -692,37 +628,106 @@ export default function App() {
           </table>
         `;
 
-        document.body.appendChild(pdfContainer);
+        document.body.appendChild(printContainer);
+
+        // Sanitize name and set main window title temporarily to name the print job clean
+        const originalTitle = document.title;
+        const sanitizedClassName = currentClass.name.replace(/[^a-zA-Z0-9-_]/g, '_');
+        document.title = `${sanitizedClassName}_Report_${new Date().toISOString().split('T')[0]}`;
+
+        // Trigger native print process (hides main window UI via CSS injected)
+        window.print();
+
+        // Restore original document configurations
+        document.title = originalTitle;
+        document.body.removeChild(printContainer);
+        document.head.removeChild(style);
+    };
+
+    const handleSavePDF = async () => {
+        if (!currentClass || classStudents.length === 0) {
+            showAlert("Cannot Generate PDF", "No contacts available to generate a PDF.");
+            return;
+        }
+
+        const sanitizedClassName = currentClass.name.replace(/[^a-zA-Z0-9-_]/g, '_');
+        const filename = `${sanitizedClassName}_Report_${new Date().toISOString().split('T')[0]}.pdf`;
 
         try {
-            // Load html2pdf.js from CDN if not already loaded
-            let html2pdfLib;
-            if (window.html2pdf) {
-                html2pdfLib = window.html2pdf;
-            } else {
-                await new Promise((resolve, reject) => {
-                    const script = document.createElement('script');
-                    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js';
-                    script.crossOrigin = 'anonymous';
-                    script.onload = resolve;
-                    script.onerror = reject;
-                    document.body.appendChild(script);
-                });
-                html2pdfLib = window.html2pdf;
-            }
+            // Load jsPDF and AutoTable from CDN dynamically
+            const loadScript = (src) => new Promise((resolve, reject) => {
+                if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
+                const s = document.createElement('script');
+                s.src = src;
+                s.onload = resolve;
+                s.onerror = reject;
+                document.body.appendChild(s);
+            });
 
-            const opt = {
-                margin: [0.4, 0.4, 0.4, 0.4],
-                filename: filename,
-                image: { type: 'jpeg', quality: 0.98 },
-                html2canvas: { scale: 2, useCORS: true, scrollY: 0, scrollX: 0 },
-                jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' }
-            };
+            await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
+            await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js');
 
-            // Generate the PDF as a Blob
-            const pdfBlob = await html2pdfLib().set(opt).from(pdfContainer).outputPdf('blob');
+            const { jsPDF } = window.jspdf;
+            const doc = new jsPDF({ orientation: 'portrait', unit: 'pt', format: 'letter' });
+            const pageWidth = doc.internal.pageSize.getWidth();
 
-            // Try the native OS "Save As" file picker (Chrome/Edge)
+            // Render Title
+            doc.setFont('helvetica', 'bold');
+            doc.setFontSize(16);
+            doc.setTextColor(224, 70, 106); // #e0466a
+            doc.text(`${currentClass.name} - Contacts & Logs Report`, 30, 36);
+
+            // Render Subtitle
+            doc.setFont('helvetica', 'normal');
+            doc.setFontSize(8);
+            doc.setTextColor(100, 116, 139); // #64748b
+            doc.text(`Generated on ${new Date().toLocaleString()} | Total Contacts: ${classStudents.length}`, 30, 50);
+
+            // Construct AutoTable dataset
+            const tableBody = classStudents.map(student => {
+                const emails = (student.emails || []).filter(Boolean).join('\n') || 'No emails';
+                const notes = student.notes || '-';
+                const history = (student.emailHistory && student.emailHistory.length > 0)
+                    ? student.emailHistory.map(log => `[${formatDate(log.timestamp)}]\n${log.message}`).join('\n\n')
+                    : 'No communication history';
+                return [student.name, emails, notes, history];
+            });
+
+            doc.autoTable({
+                head: [['Contact Name', 'Email Addresses', 'Notes', 'Expanded Log History']],
+                body: tableBody,
+                startY: 62,
+                margin: { left: 30, right: 30 },
+                tableWidth: pageWidth - 60,
+                styles: {
+                    fontSize: 8,
+                    cellPadding: 5,
+                    valign: 'top',
+                    lineColor: [203, 213, 225],
+                    lineWidth: 0.5,
+                    textColor: [51, 65, 85],
+                    overflow: 'linebreak',
+                },
+                headStyles: {
+                    fillColor: [248, 250, 252],
+                    textColor: [71, 85, 105],
+                    fontStyle: 'bold',
+                    fontSize: 7.5,
+                },
+                columnStyles: {
+                    0: { cellWidth: (pageWidth - 60) * 0.12, fontStyle: 'bold', textColor: [15, 23, 42] },
+                    1: { cellWidth: (pageWidth - 60) * 0.16 },
+                    2: { cellWidth: (pageWidth - 60) * 0.12 },
+                    3: { cellWidth: (pageWidth - 60) * 0.60 },
+                },
+                alternateRowStyles: { fillColor: [255, 255, 255] },
+                rowPageBreak: 'avoid',
+            });
+
+            // Extract PDF as a Blob
+            const pdfBlob = doc.output('blob');
+
+            // Trigger OS save-as file picker (supported natively on Chrome/Edge)
             if (window.showSaveFilePicker) {
                 try {
                     const handle = await window.showSaveFilePicker({
@@ -736,11 +741,10 @@ export default function App() {
                     await writable.write(pdfBlob);
                     await writable.close();
                 } catch (pickerErr) {
-                    // User cancelled the save dialog — do nothing
                     if (pickerErr.name !== 'AbortError') throw pickerErr;
                 }
             } else {
-                // Fallback for browsers without File System Access API (Firefox/Safari)
+                // Fallback for Safari/Firefox
                 const url = URL.createObjectURL(pdfBlob);
                 const a = document.createElement('a');
                 a.href = url;
@@ -751,10 +755,8 @@ export default function App() {
                 URL.revokeObjectURL(url);
             }
         } catch (error) {
-            console.error('Error saving PDF:', error);
-            showAlert("Error Saving PDF", "Failed to generate PDF. Please check your internet connection and try again.");
-        } finally {
-            document.body.removeChild(pdfContainer);
+            console.error('Error generating PDF:', error);
+            showAlert("Error Saving PDF", "Failed to generate PDF file. Please check your internet connection.");
         }
     };
 
