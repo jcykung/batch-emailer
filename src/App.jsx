@@ -540,10 +540,22 @@ export default function App() {
     };
 
     // --- Dynamic PDF Export Feature ---
-    const handlePrintPDF = () => {
+    // --- Dynamic PDF Export Feature ---
+    const handlePrintPDF = (isSave = false) => {
         if (!currentClass || classStudents.length === 0) {
             showAlert("Cannot Generate PDF", "No contacts available to generate a PDF.");
             return;
+        }
+
+        // Suggest default file name using document title
+        const sanitizedClassName = currentClass.name.replace(/[^a-zA-Z0-9-_]/g, '_');
+        const documentTitle = `${sanitizedClassName}_Report_${new Date().toISOString().split('T')[0]}`;
+
+        if (isSave) {
+            showAlert(
+                "Save as PDF",
+                "To save the report: in the print preview window that opens, set the 'Destination' option to 'Save as PDF' (or 'Microsoft Print to PDF') and click 'Save'. The document title will automatically name your PDF file."
+            );
         }
 
         const printWindow = window.open('', '_blank');
@@ -555,26 +567,26 @@ export default function App() {
         const contactsHtml = classStudents.map(student => {
             const cleanEmails = (student.emails || []).filter(Boolean);
             const emailsList = cleanEmails.length > 0
-                ? cleanEmails.map(e => `<li style="margin-bottom: 2px;">${e}</li>`).join('')
+                ? cleanEmails.map(e => `<li style="margin-bottom: 2px; word-break: break-all;">${e}</li>`).join('')
                 : '<span style="color: #94a3b8; font-style: italic;">No emails</span>';
 
             const historyHtml = (student.emailHistory && student.emailHistory.length > 0)
                 ? student.emailHistory.map(log => `
-            <div style="margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px dashed shadow-sm; border-color: #cbd5e1; font-size: 11px;">
-              <div style="font-weight: bold; color: #4a5568; margin-bottom: 2px;">${formatDate(log.timestamp)}</div>
-              <div style="white-space: pre-wrap; color: #1a202c;">${log.message}</div>
+            <div style="margin-bottom: 6px; padding-bottom: 4px; border-bottom: 1px dashed #e2e8f0; font-size: 10.5px;">
+              <div style="font-weight: 600; font-size: 8px; color: #94a3b8; margin-bottom: 1px;">${formatDate(log.timestamp)}</div>
+              <div style="white-space: pre-wrap; color: #0f172a; line-height: 1.35;">${log.message}</div>
             </div>
           `).join('')
-                : '<span style="color: #94a3b8; font-style: italic;">No communication history</span>';
+                : '<span style="color: #94a3b8; font-style: italic; font-size: 9px;">No communication history</span>';
 
             return `
         <tr style="border-bottom: 1px solid #cbd5e1; page-break-inside: avoid;">
-          <td style="padding: 10px; font-weight: 600; color: #0f172a; border-right: 1px solid #cbd5e1;">${student.name}</td>
-          <td style="padding: 10px; border-right: 1px solid #cbd5e1; font-size: 12px;">
-            <ul style="margin: 0; padding-left: 18px;">${emailsList}</ul>
+          <td style="padding: 6px 8px; font-weight: 500; font-size: 9.5px; color: #334155; border-right: 1px solid #cbd5e1;">${student.name}</td>
+          <td style="padding: 6px 8px; border-right: 1px solid #cbd5e1; font-size: 9px; color: #475569;">
+            <ul style="margin: 0; padding-left: 0; list-style-type: none;">${emailsList}</ul>
           </td>
-          <td style="padding: 10px; color: #475569; border-right: 1px solid #cbd5e1; font-size: 11px;">${student.notes || '-'}</td>
-          <td style="padding: 10px;">${historyHtml}</td>
+          <td style="padding: 6px 8px; color: #475569; border-right: 1px solid #cbd5e1; font-size: 9px;">${student.notes || '-'}</td>
+          <td style="padding: 6px 8px;">${historyHtml}</td>
         </tr>
       `;
         }).join('');
@@ -582,13 +594,13 @@ export default function App() {
         const htmlContent = `
       <html>
         <head>
-          <title>Export: ${currentClass.name}</title>
+          <title>${documentTitle}</title>
           <style>
-            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; padding: 20px; color: #0f172a; }
-            h1 { margin: 0 0 4px 0; font-size: 24px; color: #ff6188; }
-            h2 { margin: 0 0 20px 0; font-size: 12px; font-weight: normal; color: #64748b; }
-            table { width: 100%; border-collapse: collapse; margin-top: 15px; }
-            th { background-color: #f1f5f9; padding: 10px; text-align: left; border: 1px solid #cbd5e1; font-weight: 700; color: #ff6188; font-size: 12px; text-transform: uppercase; }
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; padding: 20px; color: #1e293b; font-size: 10px; line-height: 1.35; }
+            h1 { margin: 0 0 2px 0; font-size: 18px; color: #e0466a; font-weight: 700; letter-spacing: -0.02em; }
+            h2 { margin: 0 0 16px 0; font-size: 10px; font-weight: 500; color: #64748b; }
+            table { width: 100%; border-collapse: collapse; margin-top: 10px; table-layout: fixed; }
+            th { background-color: #f8fafc; padding: 6px 8px; text-align: left; border: 1px solid #cbd5e1; font-weight: 600; color: #475569; font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em; }
             td { border: 1px solid #cbd5e1; vertical-align: top; }
           </style>
         </head>
@@ -598,10 +610,10 @@ export default function App() {
           <table>
             <thead>
               <tr>
-                <th style="width: 20%;">Contact Name</th>
-                <th style="width: 25%;">Email Addresses</th>
-                <th style="width: 20%;">Notes</th>
-                <th style="width: 35%;">Expanded Log History</th>
+                <th style="width: 12%;">Contact Name</th>
+                <th style="width: 16%;">Email Addresses</th>
+                <th style="width: 12%;">Notes</th>
+                <th style="width: 60%;">Expanded Log History</th>
               </tr>
             </thead>
             <tbody>
@@ -972,10 +984,15 @@ export default function App() {
                                 >
                                     <Mail size={16} /> Draft Email ({selectedStudents.length})
                                 </button>
-                                {/* Print Report PDF Button positioned at the end on the right */}
-                                <button onClick={handlePrintPDF} className={`px-3 md:px-4 py-2 rounded-lg font-medium flex items-center gap-2 shadow-sm text-sm transition-all active:scale-95 ml-auto xl:ml-0 ${themeClasses.btnSecondary}`}>
-                                    <Printer size={16} className="text-[#fc9867]" /> Print Report (PDF)
-                                </button>
+                                {/* Print & Save PDF Buttons positioned at the end on the right */}
+                                <div className="flex gap-2 ml-auto xl:ml-0">
+                                    <button onClick={() => handlePrintPDF(false)} className={`px-3 md:px-4 py-2 rounded-lg font-medium flex items-center gap-2 shadow-sm text-sm transition-all active:scale-95 ${themeClasses.btnSecondary}`} title="Print report to a printer">
+                                        <Printer size={16} className="text-[#fc9867]" /> Print
+                                    </button>
+                                    <button onClick={() => handlePrintPDF(true)} className={`px-3 md:px-4 py-2 rounded-lg font-medium flex items-center gap-2 shadow-sm text-sm transition-all active:scale-95 ${themeClasses.btnSecondary}`} title="Save report as a PDF file">
+                                        <Download size={16} className="text-[#ab9df2]" /> Save PDF
+                                    </button>
+                                </div>
                             </div>
                         </div>
 
@@ -1392,6 +1409,17 @@ export default function App() {
                         <div className="p-6 space-y-4">
                             <div className="space-y-2">
                                 <div className="flex items-center justify-between">
+                                    <span className="text-sm font-bold text-[#a9dc76]">v1.2</span>
+                                    <span className="text-[10px] text-gray-500 font-mono">2026-06-30</span>
+                                </div>
+                                <ul className="list-disc pl-4 text-xs space-y-1 text-gray-600 dark:text-gray-400">
+                                    <li>Added customizable Subject Line to the email draft modal.</li>
+                                    <li>Split "Print Report" into separate "Print" and "Save PDF" actions.</li>
+                                    <li>Optimized printed PDF layout with compact contact styling and 60% width allocation for email logs.</li>
+                                </ul>
+                            </div>
+                            <div className="space-y-2">
+                                <div className="flex items-center justify-between">
                                     <span className="text-sm font-bold text-[#a9dc76]">v1.1</span>
                                     <span className="text-[10px] text-gray-500 font-mono">2026-06-30</span>
                                 </div>
@@ -1665,6 +1693,7 @@ function ImportContactsModal({ onImportPaste, onImportCSV, closeModal, themeClas
 // --- Draft Email Sub-Component ---
 function DraftEmailModal({ selectedStudents, closeModal, onLogMessage, themeClasses }) {
     const [message, setMessage] = useState('');
+    const [subject, setSubject] = useState('Student Update Notification');
     const [draftGenerated, setDraftGenerated] = useState(false);
     const [batches, setBatches] = useState([]);
     const [copiedBccIdx, setCopiedBccIdx] = useState(null);
@@ -1720,7 +1749,7 @@ function DraftEmailModal({ selectedStudents, closeModal, onLogMessage, themeClas
 
             const fullMessage = `------------DELETE BEFORE SENDING------------${messageCountText}\n\nMESSAGE BEING SENT FOR:\n${studentNamesStr}\n\n------------DELETE BEFORE SENDING------------\n\n\n${message}`;
 
-            newBatches.push({ bcc: bccString, body: fullMessage, subject: "Student Update Notification" });
+            newBatches.push({ bcc: bccString, body: fullMessage, subject: subject.trim() || "Student Update Notification" });
         }
 
         setBatches(newBatches);
@@ -1804,16 +1833,29 @@ function DraftEmailModal({ selectedStudents, closeModal, onLogMessage, themeClas
 
                     {!draftGenerated ? (
                         <div className="space-y-4 flex flex-col h-full">
-                            <p className="text-sm text-gray-455 font-medium">
-                                Type the message you would like to send. This exact message will be saved to your local log. You will have a chance to edit the final email in your email app before sending.
+                            <p className="text-sm text-[#c1c0c1] font-semibold">
+                                Type the subject line and message you would like to send. This exact message will be saved to your local log. You will have a chance to edit the final email in your email app before sending.
                             </p>
-                            <textarea
-                                value={message}
-                                onChange={(e) => setMessage(e.target.value)}
-                                autoFocus
-                                className="w-full flex-1 min-h-[220px] border border-gray-200/10 rounded-2xl p-4 focus:ring-2 focus:ring-[#ff6188] outline-none resize-none bg-gray-500/5 font-semibold text-sm leading-relaxed"
-                                placeholder="Hello Parents,&#10;&#10;I wanted to share a quick update regarding your child's progress in class this week..."
-                            />
+                            <div className="flex flex-col gap-1.5">
+                                <label className="text-xs font-bold text-gray-400 uppercase tracking-wider">Subject Line</label>
+                                <input
+                                    type="text"
+                                    value={subject}
+                                    onChange={(e) => setSubject(e.target.value)}
+                                    className={`w-full border border-gray-200/10 rounded-xl p-3 focus:ring-2 focus:ring-[#ff6188] outline-none bg-gray-500/5 font-semibold text-sm ${themeClasses.inputBg || ''}`}
+                                    placeholder="Enter email subject line..."
+                                />
+                            </div>
+                            <div className="flex-1 flex flex-col gap-1.5 min-h-[220px]">
+                                <label className="text-xs font-bold text-gray-400 uppercase tracking-wider">Message Content</label>
+                                <textarea
+                                    value={message}
+                                    onChange={(e) => setMessage(e.target.value)}
+                                    autoFocus
+                                    className="w-full flex-1 border border-gray-200/10 rounded-2xl p-4 focus:ring-2 focus:ring-[#ff6188] outline-none resize-none bg-gray-500/5 font-semibold text-sm leading-relaxed"
+                                    placeholder="Hello Parents,&#10;&#10;I wanted to share a quick update regarding your child's progress in class this week..."
+                                />
+                            </div>
                         </div>
                     ) : (
                         <div className="space-y-6">
