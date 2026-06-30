@@ -812,9 +812,8 @@ export default function App() {
                                     <div className="flex items-center gap-2 text-sm truncate flex-1">
                                         <ChevronDown
                                             size={14}
-                                            className={`transition-transform duration-200 text-gray-400 shrink-0 ${
-                                                isOpen ? 'rotate-0' : '-rotate-90'
-                                            }`}
+                                            className={`transition-transform duration-200 text-gray-400 shrink-0 ${isOpen ? 'rotate-0' : '-rotate-90'
+                                                }`}
                                         />
                                         {isOpen ? (
                                             <FolderOpen size={16} className={`shrink-0 ${activeFolderId === folder.id ? 'text-[#ff6188]' : 'text-gray-400'}`} />
@@ -825,9 +824,8 @@ export default function App() {
                                         {folder.isArchived && <span className="text-[10px] bg-[#fc9867]/20 text-[#fc9867] border border-[#fc9867]/30 px-1.5 py-0.5 rounded font-bold shrink-0">Archive</span>}
                                     </div>
                                     <div className="flex items-center gap-2">
-                                        <span className={`text-xs px-2 py-0.5 rounded-full font-bold ml-auto group-hover:hidden transition-all duration-200 ${
-                                            isDark ? 'bg-zinc-800 text-[#ff6188]' : 'bg-[#e1d5e3] text-[#e0466a]'
-                                        }`}>
+                                        <span className={`text-xs px-2 py-0.5 rounded-full font-bold ml-auto group-hover:hidden transition-all duration-200 ${isDark ? 'bg-zinc-800 text-[#ff6188]' : 'bg-[#e1d5e3] text-[#e0466a]'
+                                            }`}>
                                             {groupCount}
                                         </span>
                                         <div className="hidden group-hover:flex items-center gap-1 transition-all">
@@ -839,9 +837,8 @@ export default function App() {
                                 </div>
 
                                 <div
-                                    className={`grid transition-all duration-300 ease-in-out ${
-                                        isOpen ? 'grid-rows-[1fr] opacity-100 mt-1' : 'grid-rows-[0fr] opacity-0'
-                                    }`}
+                                    className={`grid transition-all duration-300 ease-in-out ${isOpen ? 'grid-rows-[1fr] opacity-100 mt-1' : 'grid-rows-[0fr] opacity-0'
+                                        }`}
                                 >
                                     <div className="overflow-hidden">
                                         <div className="pl-6 space-y-1 pb-1">
@@ -1051,7 +1048,7 @@ export default function App() {
                                                         <input
                                                             type="checkbox"
                                                             checked={isSelected}
-                                                            onChange={() => {}} // Controlled via onClick on tr
+                                                            onChange={() => { }} // Controlled via onClick on tr
                                                             className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500 cursor-pointer transition-all active:scale-90"
                                                         />
                                                     </td>
@@ -1903,7 +1900,7 @@ function DraftEmailModal({ selectedStudents, closeModal, onLogMessage, themeClas
                             </div>
 
                             <div className="bg-[#ab9df2]/10 border-l-4 border-[#ab9df2] p-4 text-[#ab9df2] text-xs font-semibold rounded-r-xl">
-                                <strong>💡 Tip:</strong> Because security configurations for Microsoft 365 or Gmail can sometimes hide or block automatic populating of the BCC field, clicking **"Outlook Web"** automatically copies the address list to your clipboard. Simply open the compose window, ensure the BCC field is visible, and press **Paste (Ctrl+V)**!
+                                <strong>💡 Tip:</strong> Because security configurations for Microsoft 365 or Gmail can sometimes hide or block automatic populating of the BCC field, clicking "Outlook Web" automatically copies the email addresses to your clipboard. Simply open the compose window, ensure the BCC field is visible, and press Paste (Ctrl+V) to paste the addresses to the BCC section!
                             </div>
                         </div>
                     )}
