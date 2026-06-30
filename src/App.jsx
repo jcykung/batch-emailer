@@ -633,16 +633,19 @@ export default function App() {
         const sanitizedClassName = currentClass.name.replace(/[^a-zA-Z0-9-_]/g, '_');
         const filename = `${sanitizedClassName}_Report_${new Date().toISOString().split('T')[0]}.pdf`;
 
-        // Create an offline container to render PDF content via html2pdf
+        // Container must be in-viewport for html2canvas to capture it.
+        // Position it fixed at top-left, behind all other content.
         const pdfContainer = document.createElement('div');
-        pdfContainer.style.position = 'absolute';
-        pdfContainer.style.left = '-9999px';
-        pdfContainer.style.top = '-9999px';
+        pdfContainer.style.position = 'fixed';
+        pdfContainer.style.left = '0';
+        pdfContainer.style.top = '0';
         pdfContainer.style.width = '800px';
+        pdfContainer.style.zIndex = '-1';
         pdfContainer.style.backgroundColor = '#ffffff';
         pdfContainer.style.padding = '20px';
         pdfContainer.style.color = '#1e293b';
         pdfContainer.style.fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+        pdfContainer.style.pointerEvents = 'none';
 
         const contactsHtml = classStudents.map(student => {
             const cleanEmails = (student.emails || []).filter(Boolean);
@@ -692,6 +695,7 @@ export default function App() {
         document.body.appendChild(pdfContainer);
 
         try {
+            // Load html2pdf.js from CDN if not already loaded
             let html2pdfLib;
             if (window.html2pdf) {
                 html2pdfLib = window.html2pdf;
@@ -711,14 +715,44 @@ export default function App() {
                 margin: [0.4, 0.4, 0.4, 0.4],
                 filename: filename,
                 image: { type: 'jpeg', quality: 0.98 },
-                html2canvas: { scale: 2, useCORS: true },
+                html2canvas: { scale: 2, useCORS: true, scrollY: 0, scrollX: 0 },
                 jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' }
             };
 
-            await html2pdfLib().set(opt).from(pdfContainer).save();
+            // Generate the PDF as a Blob
+            const pdfBlob = await html2pdfLib().set(opt).from(pdfContainer).outputPdf('blob');
+
+            // Try the native OS "Save As" file picker (Chrome/Edge)
+            if (window.showSaveFilePicker) {
+                try {
+                    const handle = await window.showSaveFilePicker({
+                        suggestedName: filename,
+                        types: [{
+                            description: 'PDF Document',
+                            accept: { 'application/pdf': ['.pdf'] },
+                        }],
+                    });
+                    const writable = await handle.createWritable();
+                    await writable.write(pdfBlob);
+                    await writable.close();
+                } catch (pickerErr) {
+                    // User cancelled the save dialog — do nothing
+                    if (pickerErr.name !== 'AbortError') throw pickerErr;
+                }
+            } else {
+                // Fallback for browsers without File System Access API (Firefox/Safari)
+                const url = URL.createObjectURL(pdfBlob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            }
         } catch (error) {
             console.error('Error saving PDF:', error);
-            showAlert("Error Saving PDF", "Failed to load the PDF exporter library. Please check your internet connection.");
+            showAlert("Error Saving PDF", "Failed to generate PDF. Please check your internet connection and try again.");
         } finally {
             document.body.removeChild(pdfContainer);
         }
