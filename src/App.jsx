@@ -118,6 +118,7 @@ export default function App() {
     // Edit states
     const [editingItem, setEditingItem] = useState(null);
     const [selectedStudents, setSelectedStudents] = useState([]);
+    const [lastSelectedStudentId, setLastSelectedStudentId] = useState(null);
 
     // Dynamic email inputs state for modal
     const [modalEmails, setModalEmails] = useState(['']);
@@ -227,6 +228,58 @@ export default function App() {
         setSelectedStudents(prev =>
             prev.includes(id) ? prev.filter(sId => sId !== id) : [...prev, id]
         );
+    };
+
+    const handleStudentClick = (e, studentId) => {
+        // Prevent action if clicking on interactive children
+        const target = e.target;
+        if (
+            target.closest('button') ||
+            target.closest('a') ||
+            target.closest('.select-all') ||
+            target.closest('svg')
+        ) {
+            return;
+        }
+
+        const orderedIds = classStudents.map(s => s.id);
+        const targetIndex = orderedIds.indexOf(studentId);
+        let newSelection = [...selectedStudents];
+
+        if (e.shiftKey && lastSelectedStudentId && orderedIds.includes(lastSelectedStudentId)) {
+            const lastIndex = orderedIds.indexOf(lastSelectedStudentId);
+            const start = Math.min(lastIndex, targetIndex);
+            const end = Math.max(lastIndex, targetIndex);
+            const rangeIds = orderedIds.slice(start, end + 1);
+
+            const ctrlKey = e.ctrlKey || e.metaKey;
+            if (ctrlKey) {
+                newSelection = Array.from(new Set([...selectedStudents, ...rangeIds]));
+            } else {
+                newSelection = rangeIds;
+            }
+        } else if (e.ctrlKey || e.metaKey) {
+            if (selectedStudents.includes(studentId)) {
+                newSelection = selectedStudents.filter(id => id !== studentId);
+            } else {
+                newSelection = [...selectedStudents, studentId];
+            }
+            setLastSelectedStudentId(studentId);
+        } else {
+            const isCheckbox = target.type === 'checkbox' || target.closest('input[type="checkbox"]');
+            if (isCheckbox) {
+                if (selectedStudents.includes(studentId)) {
+                    newSelection = selectedStudents.filter(id => id !== studentId);
+                } else {
+                    newSelection = [...selectedStudents, studentId];
+                }
+            } else {
+                newSelection = [studentId];
+            }
+            setLastSelectedStudentId(studentId);
+        }
+
+        setSelectedStudents(newSelection);
     };
 
     const toggleStudentHistory = (studentId) => {
@@ -953,12 +1006,16 @@ export default function App() {
                                         return (
                                             <React.Fragment key={student.id}>
                                                 {/* Main Contact Row */}
-                                                <tr className={`transition-all duration-200 ${isSelected ? themeClasses.selectedRowBg : themeClasses.altRowBg}`}>
+                                                <tr
+                                                    className={`transition-all duration-200 cursor-pointer select-none ${isSelected ? themeClasses.selectedRowBg : themeClasses.altRowBg}`}
+                                                    onClick={(e) => handleStudentClick(e, student.id)}
+                                                    onDoubleClick={() => openEditModal('student', student)}
+                                                >
                                                     <td className="p-3 text-center">
                                                         <input
                                                             type="checkbox"
                                                             checked={isSelected}
-                                                            onChange={() => toggleStudentSelection(student.id)}
+                                                            onChange={() => {}} // Controlled via onClick on tr
                                                             className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500 cursor-pointer transition-all active:scale-90"
                                                         />
                                                     </td>
