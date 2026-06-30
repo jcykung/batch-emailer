@@ -611,7 +611,7 @@ export default function App() {
         }).join('');
 
         printContainer.innerHTML = `
-          <h1 style="margin: 0 0 2px 0; font-size: 18px; color: #e0466a; font-weight: 700; letter-spacing: -0.02em; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">${currentClass.name} - Contacts & Logs Report</h1>
+          <h1 style="margin: 0 0 2px 0; font-size: 18px; color: #e0466a; font-weight: 700; letter-spacing: -0.02em; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">${currentClass.name} - Batch Emailer</h1>
           <h2 style="margin: 0 0 16px 0; font-size: 10px; font-weight: 500; color: #64748b; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">Generated on ${new Date().toLocaleString()} | Total Contacts: ${classStudents.length}</h2>
           <table style="width: 100%; border-collapse: collapse; margin-top: 10px; table-layout: fixed; border: 1px solid #cbd5e1; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
             <thead>
@@ -675,7 +675,7 @@ export default function App() {
             doc.setFont('helvetica', 'bold');
             doc.setFontSize(16);
             doc.setTextColor(224, 70, 106); // #e0466a
-            doc.text(`${currentClass.name} - Contacts & Logs Report`, 30, 36);
+            doc.text(`${currentClass.name} - Batch Emailer`, 30, 36);
 
             // Render Subtitle
             doc.setFont('helvetica', 'normal');
