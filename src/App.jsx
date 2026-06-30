@@ -89,6 +89,7 @@ export default function App() {
 
     const [activeFolderId, setActiveFolderId] = useState(null);
     const [activeClassId, setActiveClassId] = useState(null);
+    const [expandedFolders, setExpandedFolders] = useState({});
     const [showArchived, setShowArchived] = useState(false);
     const [sidebarOpen, setSidebarOpen] = useState(true);
     const [expandedStudents, setExpandedStudents] = useState([]);
@@ -181,11 +182,26 @@ export default function App() {
         return () => window.removeEventListener('resize', handleResize);
     }, []);
 
+    // Automatically expand parent folder when folder or group becomes active
+    useEffect(() => {
+        if (activeFolderId) {
+            setExpandedFolders(prev => ({ ...prev, [activeFolderId]: true }));
+        }
+    }, [activeFolderId]);
+
+    useEffect(() => {
+        if (activeClassId) {
+            const cls = data.classes.find(c => c.id === activeClassId);
+            if (cls && cls.folderId) {
+                setExpandedFolders(prev => ({ ...prev, [cls.folderId]: true }));
+            }
+        }
+    }, [activeClassId, data.classes]);
+
     // Data helpers
     const activeFolders = data.folders.filter(f => showArchived ? true : !f.isArchived);
     const activeClasses = data.classes.filter(c =>
-        (activeFolderId ? c.folderId === activeFolderId : true) &&
-        (showArchived ? true : !c.isArchived)
+        showArchived ? true : !c.isArchived
     );
     const currentClass = data.classes.find(c => c.id === activeClassId);
     const classStudents = data.students.filter(s => s.classId === activeClassId);
@@ -230,6 +246,14 @@ export default function App() {
         );
     };
 
+    const toggleFolder = (folderId) => {
+        setExpandedFolders(prev => ({
+            ...prev,
+            [folderId]: !prev[folderId]
+        }));
+        setActiveFolderId(folderId);
+    };
+
     const handleStudentClick = (e, studentId) => {
         // Prevent action if clicking on interactive children
         const target = e.target;
@@ -252,29 +276,14 @@ export default function App() {
             const end = Math.max(lastIndex, targetIndex);
             const rangeIds = orderedIds.slice(start, end + 1);
 
-            const ctrlKey = e.ctrlKey || e.metaKey;
-            if (ctrlKey) {
-                newSelection = Array.from(new Set([...selectedStudents, ...rangeIds]));
-            } else {
-                newSelection = rangeIds;
-            }
-        } else if (e.ctrlKey || e.metaKey) {
+            // Combines range with current selection by default
+            newSelection = Array.from(new Set([...selectedStudents, ...rangeIds]));
+        } else {
+            // Act as if ctrl/meta key is held by default: toggle the selection
             if (selectedStudents.includes(studentId)) {
                 newSelection = selectedStudents.filter(id => id !== studentId);
             } else {
                 newSelection = [...selectedStudents, studentId];
-            }
-            setLastSelectedStudentId(studentId);
-        } else {
-            const isCheckbox = target.type === 'checkbox' || target.closest('input[type="checkbox"]');
-            if (isCheckbox) {
-                if (selectedStudents.includes(studentId)) {
-                    newSelection = selectedStudents.filter(id => id !== studentId);
-                } else {
-                    newSelection = [...selectedStudents, studentId];
-                }
-            } else {
-                newSelection = [studentId];
             }
             setLastSelectedStudentId(studentId);
         }
@@ -788,60 +797,87 @@ export default function App() {
                         </div>
                     )}
 
-                    {activeFolders.map(folder => (
-                        <div key={folder.id} className="space-y-1">
-                            <div
-                                className={`group flex items-center justify-between p-2 rounded-md cursor-pointer transition-all duration-200 ${activeFolderId === folder.id
-                                    ? (isDark ? 'bg-[#3a373a] font-semibold text-white' : 'bg-[#e1d5e3]/65 font-semibold text-[#2d2a2e]')
-                                    : (isDark ? 'hover:bg-[#3a373a]/30' : 'hover:bg-[#e1d5e3]/30')
-                                    }`}
-                                onClick={() => setActiveFolderId(folder.id)}
-                            >
-                                <div className="flex items-center gap-2 text-sm truncate">
-                                    <FolderOpen size={16} className={activeFolderId === folder.id ? 'text-[#ff6188]' : 'text-gray-400'} />
-                                    <span className="truncate max-w-[140px]" title={folder.name}>{folder.name}</span>
-                                    {folder.isArchived && <span className="text-[10px] bg-[#fc9867]/20 text-[#fc9867] border border-[#fc9867]/30 px-1.5 py-0.5 rounded font-bold">Archive</span>}
+                    {activeFolders.map(folder => {
+                        const isOpen = !!expandedFolders[folder.id];
+                        const groupCount = data.classes.filter(c => c.folderId === folder.id && (showArchived ? true : !c.isArchived)).length;
+                        return (
+                            <div key={folder.id} className="space-y-1">
+                                <div
+                                    className={`group flex items-center justify-between p-2 rounded-md cursor-pointer transition-all duration-200 ${activeFolderId === folder.id
+                                        ? (isDark ? 'bg-[#3a373a] font-semibold text-white' : 'bg-[#e1d5e3]/65 font-semibold text-[#2d2a2e]')
+                                        : (isDark ? 'hover:bg-[#3a373a]/30' : 'hover:bg-[#e1d5e3]/30')
+                                        }`}
+                                    onClick={() => toggleFolder(folder.id)}
+                                >
+                                    <div className="flex items-center gap-2 text-sm truncate flex-1">
+                                        <ChevronDown
+                                            size={14}
+                                            className={`transition-transform duration-200 text-gray-400 shrink-0 ${
+                                                isOpen ? 'rotate-0' : '-rotate-90'
+                                            }`}
+                                        />
+                                        {isOpen ? (
+                                            <FolderOpen size={16} className={`shrink-0 ${activeFolderId === folder.id ? 'text-[#ff6188]' : 'text-gray-400'}`} />
+                                        ) : (
+                                            <Folder size={16} className={`shrink-0 ${activeFolderId === folder.id ? 'text-[#ff6188]' : 'text-gray-400'}`} />
+                                        )}
+                                        <span className="truncate max-w-[140px]" title={folder.name}>{folder.name}</span>
+                                        {folder.isArchived && <span className="text-[10px] bg-[#fc9867]/20 text-[#fc9867] border border-[#fc9867]/30 px-1.5 py-0.5 rounded font-bold shrink-0">Archive</span>}
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <span className={`text-xs px-2 py-0.5 rounded-full font-bold ml-auto group-hover:hidden transition-all duration-200 ${
+                                            isDark ? 'bg-zinc-800 text-[#ff6188]' : 'bg-[#e1d5e3] text-[#e0466a]'
+                                        }`}>
+                                            {groupCount}
+                                        </span>
+                                        <div className="hidden group-hover:flex items-center gap-1 transition-all">
+                                            <button onClick={(e) => { e.stopPropagation(); openEditModal('folder', folder); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors"><Edit2 size={13} /></button>
+                                            <button onClick={(e) => { e.stopPropagation(); toggleArchiveFolder(folder.id); }} className="p-1 text-gray-400 hover:text-[#fc9867] transition-colors"><Archive size={13} /></button>
+                                            <button onClick={(e) => { e.stopPropagation(); deleteFolder(folder.id); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors"><Trash2 size={13} /></button>
+                                        </div>
+                                    </div>
                                 </div>
-                                <div className="hidden group-hover:flex items-center gap-1 transition-all">
-                                    <button onClick={(e) => { e.stopPropagation(); openEditModal('folder', folder); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors"><Edit2 size={13} /></button>
-                                    <button onClick={(e) => { e.stopPropagation(); toggleArchiveFolder(folder.id); }} className="p-1 text-gray-400 hover:text-[#fc9867] transition-colors"><Archive size={13} /></button>
-                                    <button onClick={(e) => { e.stopPropagation(); deleteFolder(folder.id); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors"><Trash2 size={13} /></button>
+
+                                <div
+                                    className={`grid transition-all duration-300 ease-in-out ${
+                                        isOpen ? 'grid-rows-[1fr] opacity-100 mt-1' : 'grid-rows-[0fr] opacity-0'
+                                    }`}
+                                >
+                                    <div className="overflow-hidden">
+                                        <div className="pl-6 space-y-1 pb-1">
+                                            {activeClasses.filter(c => c.folderId === folder.id).map(cls => (
+                                                <div
+                                                    key={cls.id}
+                                                    className={`group flex items-center justify-between p-2 rounded-md cursor-pointer transition-all duration-200 text-sm ${activeClassId === cls.id
+                                                        ? (isDark ? 'bg-[#ab9df2]/15 text-[#ab9df2] font-semibold' : 'bg-[#ab9df2]/20 text-[#5c4cb0] font-semibold')
+                                                        : (isDark ? 'hover:bg-[#3a373a]/20 text-[#939293]' : 'hover:bg-[#e1d5e3]/20 text-[#726f73]')
+                                                        }`}
+                                                    onClick={() => { setActiveClassId(cls.id); setSelectedStudents([]); }}
+                                                >
+                                                    <div className="flex items-center gap-2 truncate">
+                                                        <Book size={14} className={activeClassId === cls.id ? 'text-[#ab9df2]' : 'text-gray-400'} />
+                                                        <span className="truncate max-w-[120px]" title={cls.name}>{cls.name}</span>
+                                                        {cls.isArchived && <span className="text-[10px] bg-[#fc9867]/20 text-[#fc9867] border border-[#fc9867]/30 px-1.5 py-0.5 rounded font-bold">Archive</span>}
+                                                    </div>
+                                                    <div className="hidden group-hover:flex items-center gap-1">
+                                                        <button onClick={(e) => { e.stopPropagation(); openEditModal('class', cls); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors"><Edit2 size={13} /></button>
+                                                        <button onClick={(e) => { e.stopPropagation(); toggleArchiveClass(cls.id); }} className="p-1 text-gray-400 hover:text-[#fc9867] transition-colors"><Archive size={13} /></button>
+                                                        <button onClick={(e) => { e.stopPropagation(); deleteClass(cls.id); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors"><Trash2 size={13} /></button>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                            <button
+                                                onClick={() => { setEditingItem(null); setModals({ ...modals, class: true }); }}
+                                                className="flex items-center gap-2 text-xs text-gray-500 hover:text-blue-600 p-2 w-full text-left transition-colors font-semibold"
+                                            >
+                                                <Plus size={14} /> Add Group
+                                            </button>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
-
-                            {activeFolderId === folder.id && (
-                                <div className="pl-6 space-y-1 transition-all">
-                                    {activeClasses.filter(c => c.folderId === folder.id).map(cls => (
-                                        <div
-                                            key={cls.id}
-                                            className={`group flex items-center justify-between p-2 rounded-md cursor-pointer transition-all duration-200 text-sm ${activeClassId === cls.id
-                                                ? (isDark ? 'bg-[#ab9df2]/15 text-[#ab9df2] font-semibold' : 'bg-[#ab9df2]/20 text-[#5c4cb0] font-semibold')
-                                                : (isDark ? 'hover:bg-[#3a373a]/20 text-[#939293]' : 'hover:bg-[#e1d5e3]/20 text-[#726f73]')
-                                                }`}
-                                            onClick={() => { setActiveClassId(cls.id); setSelectedStudents([]); }}
-                                        >
-                                            <div className="flex items-center gap-2 truncate">
-                                                <Book size={14} className={activeClassId === cls.id ? 'text-[#ab9df2]' : 'text-gray-400'} />
-                                                <span className="truncate max-w-[120px]" title={cls.name}>{cls.name}</span>
-                                                {cls.isArchived && <span className="text-[10px] bg-[#fc9867]/20 text-[#fc9867] border border-[#fc9867]/30 px-1.5 py-0.5 rounded font-bold">Archive</span>}
-                                            </div>
-                                            <div className="hidden group-hover:flex items-center gap-1">
-                                                <button onClick={(e) => { e.stopPropagation(); openEditModal('class', cls); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors"><Edit2 size={13} /></button>
-                                                <button onClick={(e) => { e.stopPropagation(); toggleArchiveClass(cls.id); }} className="p-1 text-gray-400 hover:text-[#fc9867] transition-colors"><Archive size={13} /></button>
-                                                <button onClick={(e) => { e.stopPropagation(); deleteClass(cls.id); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors"><Trash2 size={13} /></button>
-                                            </div>
-                                        </div>
-                                    ))}
-                                    <button
-                                        onClick={() => { setEditingItem(null); setModals({ ...modals, class: true }); }}
-                                        className="flex items-center gap-2 text-xs text-gray-500 hover:text-blue-600 p-2 w-full text-left transition-colors font-semibold"
-                                    >
-                                        <Plus size={14} /> Add Group
-                                    </button>
-                                </div>
-                            )}
-                        </div>
-                    ))}
+                        );
+                    })}
                 </div>
                 <div className={`p-3 border-t text-xs flex justify-between items-center ${isDark ? 'bg-zinc-900 border-[#4a474a]' : 'bg-[#e4d6eb] border-[#e1d5e3] text-[#726f73]'}`}>
                     <label className="flex items-center gap-2 cursor-pointer font-medium">
@@ -870,7 +906,7 @@ export default function App() {
                                         className="text-[10px] font-mono text-[#ab9df2] bg-[#ab9df2]/10 border border-[#ab9df2]/20 px-1.5 py-0.5 rounded cursor-pointer hover:bg-[#ab9df2]/20 hover:text-white transition-colors"
                                         title="View Changelog"
                                     >
-                                        v1.0
+                                        v1.1
                                     </span>
                                 </span>
                                 {currentClass && (
@@ -1357,6 +1393,20 @@ export default function App() {
                             <button onClick={closeModals} className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-500/10 transition-colors"><X size={20} /></button>
                         </div>
                         <div className="p-6 space-y-4">
+                            <div className="space-y-2">
+                                <div className="flex items-center justify-between">
+                                    <span className="text-sm font-bold text-[#a9dc76]">v1.1</span>
+                                    <span className="text-[10px] text-gray-500 font-mono">2026-06-30</span>
+                                </div>
+                                <ul className="list-disc pl-4 text-xs space-y-1 text-gray-600 dark:text-gray-400">
+                                    <li>Sidebar folders now animate open and closed with a smooth slide transition.</li>
+                                    <li>Folder icons change between closed and open states to clearly indicate expand/collapse.</li>
+                                    <li>Added rotating chevron indicator on each folder row.</li>
+                                    <li>Added group count badge on each folder, visible at rest and hidden on hover for action buttons.</li>
+                                    <li>Contact rows now toggle selection on click (Ctrl-like behavior by default) — select multiple contacts without holding modifier keys.</li>
+                                    <li>Shift-click range selection now appends to the current selection.</li>
+                                </ul>
+                            </div>
                             <div className="space-y-2">
                                 <div className="flex items-center justify-between">
                                     <span className="text-sm font-bold text-[#a9dc76]">v1.0</span>
