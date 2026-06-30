@@ -1671,9 +1671,22 @@ function DraftEmailModal({ selectedStudents, closeModal, onLogMessage, themeClas
     const [draftGenerated, setDraftGenerated] = useState(false);
     const [batches, setBatches] = useState([]);
     const [copiedBccIdx, setCopiedBccIdx] = useState(null);
-    const [copiedBodyIdx, setCopiedBodyIdx] = 50;
+    const [copiedBodyIdx, setCopiedBodyIdx] = useState(null);
     const [outlookClickedIdx, setOutlookClickedIdx] = useState(null);
     const isDark = themeClasses.textPrimary.includes('text-[#fcfaf2]');
+
+    // Track active timers for cleanup to prevent memory leaks
+    const timersRef = useRef([]);
+    useEffect(() => {
+        return () => {
+            timersRef.current.forEach(clearTimeout);
+        };
+    }, []);
+    const safeTimeout = (fn, ms) => {
+        const id = setTimeout(fn, ms);
+        timersRef.current.push(id);
+        return id;
+    };
 
     // Filter contacts who have at least one valid email
     const validStudents = selectedStudents.filter(s => s.emails && s.emails.filter(Boolean).length > 0);
@@ -1743,10 +1756,10 @@ function DraftEmailModal({ selectedStudents, closeModal, onLogMessage, themeClas
             if (successful && !silent) {
                 if (type === 'bcc') {
                     setCopiedBccIdx(index);
-                    setTimeout(() => setCopiedBccIdx(null), 2000);
+                    safeTimeout(() => setCopiedBccIdx(null), 2000);
                 } else {
                     setCopiedBodyIdx(index);
-                    setTimeout(() => setCopiedBodyIdx(null), 2000);
+                    safeTimeout(() => setCopiedBodyIdx(null), 2000);
                 }
             }
         } catch (err) {
@@ -1760,7 +1773,7 @@ function DraftEmailModal({ selectedStudents, closeModal, onLogMessage, themeClas
 
         // 2. Trigger UI instruction alert state
         setOutlookClickedIdx(index);
-        setTimeout(() => setOutlookClickedIdx(null), 7000);
+        safeTimeout(() => setOutlookClickedIdx(null), 7000);
 
         // 3. Open Outlook compose link
         window.open(url, '_blank');
