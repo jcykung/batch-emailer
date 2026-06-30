@@ -540,23 +540,14 @@ export default function App() {
     };
 
     // --- Dynamic PDF Export Feature ---
-    // --- Dynamic PDF Export Feature ---
-    const handlePrintPDF = (isSave = false) => {
+    const handlePrintPDF = () => {
         if (!currentClass || classStudents.length === 0) {
             showAlert("Cannot Generate PDF", "No contacts available to generate a PDF.");
             return;
         }
 
-        // Suggest default file name using document title
         const sanitizedClassName = currentClass.name.replace(/[^a-zA-Z0-9-_]/g, '_');
         const documentTitle = `${sanitizedClassName}_Report_${new Date().toISOString().split('T')[0]}`;
-
-        if (isSave) {
-            showAlert(
-                "Save as PDF",
-                "To save the report: in the print preview window that opens, set the 'Destination' option to 'Save as PDF' (or 'Microsoft Print to PDF') and click 'Save'. The document title will automatically name your PDF file."
-            );
-        }
 
         const printWindow = window.open('', '_blank');
         if (!printWindow) {
@@ -581,12 +572,12 @@ export default function App() {
 
             return `
         <tr style="border-bottom: 1px solid #cbd5e1; page-break-inside: avoid;">
-          <td style="padding: 6px 8px; font-weight: 500; font-size: 9.5px; color: #334155; border-right: 1px solid #cbd5e1;">${student.name}</td>
-          <td style="padding: 6px 8px; border-right: 1px solid #cbd5e1; font-size: 9px; color: #475569;">
+          <td style="padding: 6px 8px; font-weight: 500; font-size: 9.5px; color: #334155; border-right: 1px solid #cbd5e1; vertical-align: top;">${student.name}</td>
+          <td style="padding: 6px 8px; border-right: 1px solid #cbd5e1; font-size: 9px; color: #475569; vertical-align: top;">
             <ul style="margin: 0; padding-left: 0; list-style-type: none;">${emailsList}</ul>
           </td>
-          <td style="padding: 6px 8px; color: #475569; border-right: 1px solid #cbd5e1; font-size: 9px;">${student.notes || '-'}</td>
-          <td style="padding: 6px 8px;">${historyHtml}</td>
+          <td style="padding: 6px 8px; color: #475569; border-right: 1px solid #cbd5e1; font-size: 9px; vertical-align: top;">${student.notes || '-'}</td>
+          <td style="padding: 6px 8px; vertical-align: top;">${historyHtml}</td>
         </tr>
       `;
         }).join('');
@@ -631,6 +622,106 @@ export default function App() {
 
         printWindow.document.write(htmlContent);
         printWindow.document.close();
+    };
+
+    const handleSavePDF = async () => {
+        if (!currentClass || classStudents.length === 0) {
+            showAlert("Cannot Generate PDF", "No contacts available to generate a PDF.");
+            return;
+        }
+
+        const sanitizedClassName = currentClass.name.replace(/[^a-zA-Z0-9-_]/g, '_');
+        const filename = `${sanitizedClassName}_Report_${new Date().toISOString().split('T')[0]}.pdf`;
+
+        // Create an offline container to render PDF content via html2pdf
+        const pdfContainer = document.createElement('div');
+        pdfContainer.style.position = 'absolute';
+        pdfContainer.style.left = '-9999px';
+        pdfContainer.style.top = '-9999px';
+        pdfContainer.style.width = '800px';
+        pdfContainer.style.backgroundColor = '#ffffff';
+        pdfContainer.style.padding = '20px';
+        pdfContainer.style.color = '#1e293b';
+        pdfContainer.style.fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+
+        const contactsHtml = classStudents.map(student => {
+            const cleanEmails = (student.emails || []).filter(Boolean);
+            const emailsList = cleanEmails.length > 0
+                ? cleanEmails.map(e => `<li style="margin-bottom: 2px; word-break: break-all;">${e}</li>`).join('')
+                : '<span style="color: #94a3b8; font-style: italic;">No emails</span>';
+
+            const historyHtml = (student.emailHistory && student.emailHistory.length > 0)
+                ? student.emailHistory.map(log => `
+            <div style="margin-bottom: 6px; padding-bottom: 4px; border-bottom: 1px dashed #e2e8f0; font-size: 10.5px;">
+              <div style="font-weight: 600; font-size: 8px; color: #94a3b8; margin-bottom: 1px;">${formatDate(log.timestamp)}</div>
+              <div style="white-space: pre-wrap; color: #0f172a; line-height: 1.35;">${log.message}</div>
+            </div>
+          `).join('')
+                : '<span style="color: #94a3b8; font-style: italic; font-size: 9px;">No communication history</span>';
+
+            return `
+        <tr style="border-bottom: 1px solid #cbd5e1; page-break-inside: avoid;">
+          <td style="padding: 6px 8px; font-weight: 500; font-size: 9.5px; color: #334155; border-right: 1px solid #cbd5e1; vertical-align: top;">${student.name}</td>
+          <td style="padding: 6px 8px; border-right: 1px solid #cbd5e1; font-size: 9px; color: #475569; vertical-align: top;">
+            <ul style="margin: 0; padding-left: 0; list-style-type: none;">${emailsList}</ul>
+          </td>
+          <td style="padding: 6px 8px; color: #475569; border-right: 1px solid #cbd5e1; font-size: 9px; vertical-align: top;">${student.notes || '-'}</td>
+          <td style="padding: 6px 8px; vertical-align: top;">${historyHtml}</td>
+        </tr>
+      `;
+        }).join('');
+
+        pdfContainer.innerHTML = `
+          <h1 style="margin: 0 0 2px 0; font-size: 18px; color: #e0466a; font-weight: 700; letter-spacing: -0.02em; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">${currentClass.name} - Contacts & Logs Report</h1>
+          <h2 style="margin: 0 0 16px 0; font-size: 10px; font-weight: 500; color: #64748b; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">Generated on ${new Date().toLocaleString()} | Total Contacts: ${classStudents.length}</h2>
+          <table style="width: 100%; border-collapse: collapse; margin-top: 10px; table-layout: fixed; border: 1px solid #cbd5e1; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+            <thead>
+              <tr style="background-color: #f8fafc;">
+                <th style="width: 12%; padding: 6px 8px; text-align: left; border: 1px solid #cbd5e1; font-weight: 600; color: #475569; font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em;">Contact Name</th>
+                <th style="width: 16%; padding: 6px 8px; text-align: left; border: 1px solid #cbd5e1; font-weight: 600; color: #475569; font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em;">Email Addresses</th>
+                <th style="width: 12%; padding: 6px 8px; text-align: left; border: 1px solid #cbd5e1; font-weight: 600; color: #475569; font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em;">Notes</th>
+                <th style="width: 60%; padding: 6px 8px; text-align: left; border: 1px solid #cbd5e1; font-weight: 600; color: #475569; font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em;">Expanded Log History</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${contactsHtml}
+            </tbody>
+          </table>
+        `;
+
+        document.body.appendChild(pdfContainer);
+
+        try {
+            let html2pdfLib;
+            if (window.html2pdf) {
+                html2pdfLib = window.html2pdf;
+            } else {
+                await new Promise((resolve, reject) => {
+                    const script = document.createElement('script');
+                    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js';
+                    script.crossOrigin = 'anonymous';
+                    script.onload = resolve;
+                    script.onerror = reject;
+                    document.body.appendChild(script);
+                });
+                html2pdfLib = window.html2pdf;
+            }
+
+            const opt = {
+                margin: [0.4, 0.4, 0.4, 0.4],
+                filename: filename,
+                image: { type: 'jpeg', quality: 0.98 },
+                html2canvas: { scale: 2, useCORS: true },
+                jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' }
+            };
+
+            await html2pdfLib().set(opt).from(pdfContainer).save();
+        } catch (error) {
+            console.error('Error saving PDF:', error);
+            showAlert("Error Saving PDF", "Failed to load the PDF exporter library. Please check your internet connection.");
+        } finally {
+            document.body.removeChild(pdfContainer);
+        }
     };
 
     // --- Export / Import Logic ---
@@ -986,10 +1077,10 @@ export default function App() {
                                 </button>
                                 {/* Print & Save PDF Buttons positioned at the end on the right */}
                                 <div className="flex gap-2 ml-auto xl:ml-0">
-                                    <button onClick={() => handlePrintPDF(false)} className={`px-3 md:px-4 py-2 rounded-lg font-medium flex items-center gap-2 shadow-sm text-sm transition-all active:scale-95 ${themeClasses.btnSecondary}`} title="Print report to a printer">
+                                    <button onClick={handlePrintPDF} className={`px-3 md:px-4 py-2 rounded-lg font-medium flex items-center gap-2 shadow-sm text-sm transition-all active:scale-95 ${themeClasses.btnSecondary}`} title="Print report to a printer">
                                         <Printer size={16} className="text-[#fc9867]" /> Print
                                     </button>
-                                    <button onClick={() => handlePrintPDF(true)} className={`px-3 md:px-4 py-2 rounded-lg font-medium flex items-center gap-2 shadow-sm text-sm transition-all active:scale-95 ${themeClasses.btnSecondary}`} title="Save report as a PDF file">
+                                    <button onClick={handleSavePDF} className={`px-3 md:px-4 py-2 rounded-lg font-medium flex items-center gap-2 shadow-sm text-sm transition-all active:scale-95 ${themeClasses.btnSecondary}`} title="Save report as a PDF file">
                                         <Download size={16} className="text-[#ab9df2]" /> Save PDF
                                     </button>
                                 </div>
