@@ -1,5 +1,21 @@
 import os
+import subprocess
+import shutil
 from PIL import Image, ImageDraw
+
+def render_with_sips(svg_path, output_path, size):
+    try:
+        # Check if sips is available on the system
+        if not shutil.which("sips"):
+            return False
+        
+        # Run sips to render SVG to PNG at specified size
+        cmd = ["sips", "-s", "format", "png", "-z", str(size), str(size), svg_path, "--out", output_path]
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        return os.path.exists(output_path)
+    except Exception as e:
+        print(f"sips rendering failed: {e}")
+        return False
 
 def create_gradient_icon(size):
     # Create the final RGBA image with transparent background
@@ -60,6 +76,8 @@ def main():
     public_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../public"))
     os.makedirs(public_dir, exist_ok=True)
     
+    svg_path = os.path.join(public_dir, "favicon.svg")
+    
     sizes = [
         (16, "favicon-16.png"),
         (32, "favicon-32.png"),
@@ -71,9 +89,17 @@ def main():
     
     for size, name in sizes:
         icon_path = os.path.join(public_dir, name)
-        img = create_gradient_icon(size)
-        img.save(icon_path, "PNG")
-        print(f"Generated {name} ({size}x{size})")
+        rendered = False
+        
+        if os.path.exists(svg_path):
+            rendered = render_with_sips(svg_path, icon_path, size)
+            
+        if not rendered:
+            print(f"Falling back to procedural generation for {name} ({size}x{size})")
+            img = create_gradient_icon(size)
+            img.save(icon_path, "PNG")
+        else:
+            print(f"Generated {name} ({size}x{size}) from SVG")
 
 if __name__ == "__main__":
     main()
