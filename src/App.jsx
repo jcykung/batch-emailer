@@ -1149,10 +1149,10 @@ export default function App() {
                                 <thead className={`sticky top-0 z-10 text-xs font-bold uppercase tracking-wider ${themeClasses.tableHeaderBg}`}>
                                     <tr>
                                         <th className="p-3 w-12 text-center"><Check size={18} className="mx-auto text-gray-455" /></th>
-                                        <th className="p-3">Name</th>
-                                        <th className="p-3">Emails</th>
-                                        <th className="p-3">Most Recent Email</th>
-                                        <th className="p-3 w-48">Message Snippet</th>
+                                        <th className="p-3 w-px whitespace-nowrap">Name</th>
+                                        <th className="p-3 w-px whitespace-nowrap">Emails</th>
+                                        <th className="p-3 w-px whitespace-nowrap">Most Recent Email</th>
+                                        <th className="p-3">Message Snippet</th>
                                         <th className="p-3">Notes</th>
                                         <th className="p-3 w-16 text-center"></th>
                                     </tr>
@@ -1196,7 +1196,7 @@ export default function App() {
                                                             className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500 cursor-pointer transition-all active:scale-90"
                                                         />
                                                     </td>
-                                                    <td className="p-3 text-sm">
+                                                    <td className="p-3 text-sm whitespace-nowrap">
                                                         <div className={`font-bold transition-colors duration-300 ${themeClasses.textPrimary}`}>{student.name}</div>
                                                         {historyCount > 0 && (
                                                             <button
@@ -1210,7 +1210,7 @@ export default function App() {
                                                             </button>
                                                         )}
                                                     </td>
-                                                    <td className="p-3 text-sm">
+                                                    <td className="p-3 text-sm whitespace-nowrap">
                                                         <div className="flex flex-col gap-1 max-w-xs">
                                                             {missingEmail ? (
                                                                 <div className="px-2 py-1 rounded bg-[#ff6188]/20 text-[#ff6188] border border-[#ff6188]/30 text-xs font-bold flex items-center gap-1 inline-block self-start shadow-sm animate-pulse">
@@ -1248,13 +1248,13 @@ export default function App() {
                                                             )}
                                                         </div>
                                                     </td>
-                                                    <td className={`p-3 text-xs font-semibold transition-colors duration-300 ${themeClasses.textSecondary}`}>
+                                                    <td className={`p-3 text-xs font-semibold whitespace-nowrap transition-colors duration-300 ${themeClasses.textSecondary}`}>
                                                         {lastLog ? formatDate(lastLog.timestamp) : <span className="text-gray-300 italic">Never emailed</span>}
                                                     </td>
-                                                    <td className={`p-3 text-xs truncate max-w-[200px] font-semibold transition-colors duration-300 ${themeClasses.textSecondary}`} title={lastLog?.message || ''}>
+                                                    <td className={`p-3 text-xs truncate max-w-[400px] font-semibold transition-colors duration-300 ${themeClasses.textSecondary}`} title={lastLog?.message || ''}>
                                                         {lastLog ? lastLog.message : ''}
                                                     </td>
-                                                    <td className={`p-3 text-xs truncate max-w-[150px] font-semibold transition-colors duration-300 ${themeClasses.textSecondary}`} title={student.notes || ''}>
+                                                    <td className={`p-3 text-xs truncate max-w-[300px] font-semibold transition-colors duration-300 ${themeClasses.textSecondary}`} title={student.notes || ''}>
                                                         {student.notes || <span className="text-gray-300 italic">-</span>}
                                                     </td>
                                                     <td className="p-3 text-center">
@@ -1583,6 +1583,7 @@ export default function App() {
                 <DraftEmailModal
                     selectedStudents={data.students.filter(s => selectedStudents.includes(s.id))}
                     closeModal={closeModals}
+                    groupName={currentClass?.name || ''}
                     onLogMessage={(message) => {
                         const timestamp = new Date().toISOString();
                         setData(prev => ({
@@ -1818,9 +1819,10 @@ function ImportContactsModal({ onImportPaste, onImportCSV, closeModal, themeClas
 }
 
 // --- Draft Email Sub-Component ---
-function DraftEmailModal({ selectedStudents, closeModal, onLogMessage, themeClasses }) {
+function DraftEmailModal({ selectedStudents, closeModal, groupName, onLogMessage, themeClasses }) {
     const [message, setMessage] = useState('');
-    const [subject, setSubject] = useState('Student Update Notification');
+    const defaultSubject = groupName ? `${groupName} Update` : 'Student Update Notification';
+    const [subject, setSubject] = useState(defaultSubject);
     const [draftGenerated, setDraftGenerated] = useState(false);
     const [batches, setBatches] = useState([]);
     const [copiedBccIdx, setCopiedBccIdx] = useState(null);
@@ -1876,7 +1878,7 @@ function DraftEmailModal({ selectedStudents, closeModal, onLogMessage, themeClas
 
             const fullMessage = `------------DELETE BEFORE SENDING------------${messageCountText}\n\nMESSAGE BEING SENT FOR:\n${studentNamesStr}\n\n------------DELETE BEFORE SENDING------------\n\n\n${message}`;
 
-            newBatches.push({ bcc: bccString, body: fullMessage, subject: subject.trim() || "Student Update Notification" });
+            newBatches.push({ bcc: bccString, body: fullMessage, subject: subject.trim() || defaultSubject });
         }
 
         setBatches(newBatches);
