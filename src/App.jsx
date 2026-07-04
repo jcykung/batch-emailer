@@ -4,8 +4,9 @@ import {
     CheckSquare, Square, X, Archive, FileText, Check, AlertCircle,
     Copy, ExternalLink, RefreshCw, FolderOpen, MoreVertical, Menu,
     ChevronDown, ChevronUp, Clock, History, Trash, Printer, FileSpreadsheet,
-    Sun, Moon, Sparkles, Coffee
+    Sun, Moon, Sparkles, Coffee, Cloud, Database, Settings, User
 } from 'lucide-react';
+import { signIn, signOut, getActiveAccount, fetchFromOneDrive, saveToOneDrive } from './microsoftSync';
 
 // --- Utility Functions ---
 const generateId = () => crypto.randomUUID();
@@ -107,6 +108,18 @@ export default function App() {
         changelog: false
     });
 
+    // Storage Mode & Microsoft Sync States
+    const [storageMode, setStorageMode] = useState(() => window.localStorage.getItem('batch-emailer-storage-mode'));
+    const [msClientId, setMsClientId] = useState(() => window.localStorage.getItem('batch-emailer-ms-client-id') || '');
+    const [msTenantId, setMsTenantId] = useState(() => window.localStorage.getItem('batch-emailer-ms-tenant-id') || 'common');
+    const [msAccount, setMsAccount] = useState(null);
+    const [isSavingMs, setIsSavingMs] = useState(false);
+    const [msSaveError, setMsSaveError] = useState(null);
+    const [showAppRegSettings, setShowAppRegSettings] = useState(false);
+    const [showMsDropdown, setShowMsDropdown] = useState(false);
+    const [lastSyncedTime, setLastSyncedTime] = useState(null);
+    const [msSyncLoading, setMsSyncLoading] = useState(false);
+
     // Custom Dialog Alert/Confirm State to bypass restricted environment popups
     const [customDialog, setCustomDialog] = useState({
         isOpen: false,
@@ -167,6 +180,136 @@ export default function App() {
             }
         }
     }, [data, setData]);
+
+    // Check and initialize Microsoft login on mount
+    useEffect(() => {
+        if (storageMode === 'microsoft' && msClientId) {
+            getActiveAccount(msClientId, msTenantId)
+                .then(account => {
+                    if (account) {
+                        setMsAccount(account);
+                        loadOneDriveData(msClientId, msTenantId);
+                    } else {
+                        setMsAccount(null);
+                    }
+                })
+                .catch(err => {
+                    console.error("Failed to restore MSAL active account:", err);
+                });
+        }
+    }, [storageMode, msClientId, msTenantId]);
+
+    // Save changes to OneDrive (debounced)
+    useEffect(() => {
+        if (storageMode !== 'microsoft' || !msClientId || !msAccount) return;
+        
+        const delayDebounceFn = setTimeout(async () => {
+            setIsSavingMs(true);
+            setMsSaveError(null);
+            try {
+                await saveToOneDrive(data, msClientId, msTenantId);
+                setLastSyncedTime(new Date().toLocaleTimeString());
+            } catch (err) {
+                console.error("Auto-save to OneDrive failed:", err);
+                setMsSaveError(err.message || "Auto-save failed");
+            } finally {
+                setIsSavingMs(false);
+            }
+        }, 3000);
+
+        return () => clearTimeout(delayDebounceFn);
+    }, [data, storageMode, msClientId, msTenantId, msAccount]);
+
+    const loadOneDriveData = async (clientId, tenantId) => {
+        const cid = clientId || msClientId;
+        const tid = tenantId || msTenantId;
+        if (!cid) return;
+        
+        setMsSyncLoading(true);
+        setMsSaveError(null);
+        try {
+            const remoteData = await fetchFromOneDrive(cid, tid);
+            if (remoteData) {
+                setData(remoteData);
+                setLastSyncedTime(new Date().toLocaleTimeString());
+            } else {
+                // File not found on OneDrive, prompt to upload local data
+                showConfirm(
+                    "Initialize OneDrive Cloud Sync",
+                    "No existing Batch Emailer data was found on your OneDrive. Would you like to upload your current browser data to start syncing?",
+                    async () => {
+                        try {
+                            setIsSavingMs(true);
+                            await saveToOneDrive(data, cid, tid);
+                            setLastSyncedTime(new Date().toLocaleTimeString());
+                            showAlert("Sync Initialized", "Your browser data has been successfully uploaded to your OneDrive.");
+                        } catch (err) {
+                            showAlert("Initial Sync Failed", "Failed to upload data: " + err.message);
+                        } finally {
+                            setIsSavingMs(false);
+                        }
+                    }
+                );
+            }
+        } catch (err) {
+            console.error("Failed to load data from OneDrive:", err);
+            setMsSaveError(err.message || "Failed to connect to OneDrive");
+        } finally {
+            setMsSyncLoading(false);
+        }
+    };
+
+    const handleSignInMicrosoft = async (customClientId, customTenantId) => {
+        const cid = customClientId !== undefined ? customClientId : msClientId;
+        const tid = customTenantId !== undefined ? customTenantId : msTenantId;
+        
+        if (!cid) {
+            showAlert("Configuration Missing", "Please enter your Azure Client ID in the registration settings.");
+            return;
+        }
+        
+        try {
+            setMsSyncLoading(true);
+            const account = await signIn(cid, tid);
+            setMsAccount(account);
+            window.localStorage.setItem('batch-emailer-storage-mode', 'microsoft');
+            setStorageMode('microsoft');
+            await loadOneDriveData(cid, tid);
+        } catch (error) {
+            console.error("Sign-in failed:", error);
+            showAlert("Sign In Failed", "Could not complete Microsoft sign-in: " + error.message);
+        } finally {
+            setMsSyncLoading(false);
+        }
+    };
+
+    const handleSignOutMicrosoft = async () => {
+        try {
+            await signOut(msClientId, msTenantId);
+        } catch (e) {
+            console.error("Error signing out:", e);
+        }
+        setMsAccount(null);
+        setStorageMode('browser');
+        window.localStorage.setItem('batch-emailer-storage-mode', 'browser');
+        showAlert("Signed Out", "Switched back to Browser Local Storage.");
+    };
+
+    const handleChooseBrowser = () => {
+        setStorageMode('browser');
+        window.localStorage.setItem('batch-emailer-storage-mode', 'browser');
+    };
+
+    const handleSaveAppRegSettings = () => {
+        if (!msClientId.trim()) {
+            showAlert("Invalid Input", "Please enter a valid Microsoft Client ID.");
+            return;
+        }
+        window.localStorage.setItem('batch-emailer-ms-client-id', msClientId.trim());
+        window.localStorage.setItem('batch-emailer-ms-tenant-id', msTenantId.trim());
+        showAlert("Configuration Saved", "Your custom Azure AD App Registration has been saved.");
+        setShowAppRegSettings(false);
+    };
 
     // Handle auto-collapsing sidebar on mount for smaller mobile screens
     useEffect(() => {
@@ -882,6 +1025,140 @@ export default function App() {
         btnDanger: isDark ? 'bg-[#ff6188]/20 hover:bg-[#ff6188]/30 text-[#ff6188] border border-[#ff6188]/30' : 'bg-[#e0466a]/10 hover:bg-[#e0466a]/20 text-[#e0466a] border border-[#e0466a]/20'
     };
 
+    if (storageMode === null) {
+        return (
+            <div className={`fixed inset-0 flex items-center justify-center bg-black/60 backdrop-blur-md z-[100] p-4 font-sans ${isDark ? 'dark' : ''}`}>
+                <div className={`w-full max-w-2xl rounded-3xl border p-8 space-y-6 shadow-2xl transition-all duration-300 animate-in fade-in zoom-in-95 duration-300 ${themeClasses.cardBg}`}>
+                    <div className="text-center space-y-2">
+                        <div className="inline-flex p-3 rounded-2xl bg-[#ff6188]/10 text-[#ff6188] mb-2 animate-bounce">
+                            <Mail size={40} className="text-[#ff6188]" />
+                        </div>
+                        <h2 className="text-3xl font-extrabold tracking-tight bg-gradient-to-r from-[#ff6188] via-[#fc9867] to-[#ffd866] bg-clip-text text-transparent">
+                            Batch Emailer
+                        </h2>
+                        <p className={`text-sm md:text-base font-semibold ${themeClasses.textSecondary}`}>
+                            Select a storage mode to manage your contact groups and email logs.
+                        </p>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {/* Option 1: Browser Storage */}
+                        <div 
+                            onClick={handleChooseBrowser}
+                            className={`group cursor-pointer rounded-2xl border p-6 text-center space-y-3 transition-all duration-300 hover:scale-[1.02] flex flex-col justify-between text-left ${
+                                isDark 
+                                    ? 'bg-[#403e41]/30 hover:bg-[#ff6188]/5 border-[#4a474a] hover:border-[#ff6188]/50 text-[#fcfaf2]' 
+                                    : 'bg-white hover:bg-[#ff6188]/5 border-[#e1d5e3] hover:border-[#ff6188]/50 text-[#2d2a2e]'
+                            }`}
+                        >
+                            <div className="space-y-2">
+                                <div className="inline-flex p-2.5 rounded-xl bg-blue-500/10 text-blue-500 mb-2">
+                                    <Database size={24} />
+                                </div>
+                                <h3 className="font-bold text-lg">Local Browser Storage</h3>
+                                <p className={`text-xs mt-1.5 leading-relaxed ${themeClasses.textMuted}`}>
+                                    Saves data strictly inside this browser. Secure, private, and works instantly without any account setup.
+                                </p>
+                            </div>
+                            <button 
+                                onClick={(e) => { e.stopPropagation(); handleChooseBrowser(); }}
+                                className={`mt-4 w-full py-2 rounded-lg text-xs font-bold transition-all active:scale-95 cursor-pointer ${themeClasses.btnSecondary}`}
+                            >
+                                Use Browser Storage
+                            </button>
+                        </div>
+
+                        {/* Option 2: Microsoft Account */}
+                        <div 
+                            onClick={() => msClientId && handleSignInMicrosoft()}
+                            className={`group cursor-pointer rounded-2xl border p-6 text-center space-y-3 transition-all duration-300 hover:scale-[1.02] flex flex-col justify-between text-left ${
+                                isDark 
+                                    ? 'bg-[#403e41]/30 hover:bg-[#a9dc76]/5 border-[#4a474a] hover:border-[#a9dc76]/50 text-[#fcfaf2]' 
+                                    : 'bg-white hover:bg-[#a9dc76]/5 border-[#e1d5e3] hover:border-[#a9dc76]/50 text-[#2d2a2e]'
+                            }`}
+                        >
+                            <div className="space-y-2">
+                                <div className="inline-flex p-2.5 rounded-xl bg-[#a9dc76]/10 text-[#a9dc76] mb-2">
+                                    <Cloud size={24} />
+                                </div>
+                                <h3 className="font-bold text-lg">Microsoft 365 Sync</h3>
+                                <p className={`text-xs mt-1.5 leading-relaxed ${themeClasses.textMuted}`}>
+                                    Syncs data to your school district Microsoft account (OneDrive). Access your contacts and history across all your devices securely.
+                                </p>
+                            </div>
+                            <button 
+                                onClick={(e) => { e.stopPropagation(); handleSignInMicrosoft(); }}
+                                disabled={!msClientId}
+                                className={`mt-4 w-full py-2.5 rounded-lg text-xs font-bold text-white transition-all active:scale-95 flex items-center justify-center gap-2 cursor-pointer ${
+                                    msClientId 
+                                        ? 'bg-blue-600 hover:bg-blue-500 shadow-md' 
+                                        : 'bg-gray-400 dark:bg-zinc-700 text-gray-500 dark:text-gray-400 cursor-not-allowed border border-transparent'
+                                }`}
+                            >
+                                <svg className="w-3.5 h-3.5 fill-current flex-shrink-0" viewBox="0 0 23 23">
+                                    <path fill="#f35325" d="M0 0h11v11H0z"/>
+                                    <path fill="#81bc06" d="M12 0h11v11H12z"/>
+                                    <path fill="#05a6f0" d="M0 12h11v11H0z"/>
+                                    <path fill="#ffba08" d="M12 12h11v11H12z"/>
+                                </svg>
+                                {msClientId ? 'Log in with Microsoft' : 'Configure Client ID Below'}
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Settings Section Toggle */}
+                    <div className="pt-2 border-t border-[#4a474a]/20 flex flex-col items-center">
+                        <button 
+                            onClick={() => setShowAppRegSettings(!showAppRegSettings)}
+                            className={`text-xs font-semibold flex items-center gap-1 hover:underline cursor-pointer ${themeClasses.textMuted}`}
+                        >
+                            <Settings size={12} /> Microsoft App Registration Settings (District Admin)
+                        </button>
+                        
+                        {showAppRegSettings && (
+                            <div className={`mt-4 p-4 rounded-xl border w-full text-left space-y-3 ${themeClasses.badgeBg}`}>
+                                <h4 className="font-bold text-xs">Azure App Registration Config</h4>
+                                <p className="text-[10px] text-gray-500 dark:text-gray-400 leading-normal">
+                                    Register this app in your school district Entra ID (Azure AD) portal as a Single-Page Application (SPA) with Redirect URI: <code className="bg-black/20 px-1 py-0.5 rounded font-mono">{window.location.origin}/</code> and delegate permissions: <code className="bg-black/20 px-1 py-0.5 rounded font-mono">User.Read</code>, <code className="bg-black/20 px-1 py-0.5 rounded font-mono">Files.ReadWrite</code>.
+                                </p>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                    <div className="space-y-1">
+                                        <label className="text-[9px] font-bold block uppercase tracking-wider">Client (Application) ID</label>
+                                        <input 
+                                            type="text" 
+                                            value={msClientId}
+                                            onChange={(e) => setMsClientId(e.target.value)}
+                                            placeholder="Enter Azure Client ID" 
+                                            className={`w-full p-2 text-xs rounded border ${themeClasses.inputBg}`}
+                                        />
+                                    </div>
+                                    <div className="space-y-1">
+                                        <label className="text-[9px] font-bold block uppercase tracking-wider">Tenant ID</label>
+                                        <input 
+                                            type="text" 
+                                            value={msTenantId}
+                                            onChange={(e) => setMsTenantId(e.target.value)}
+                                            placeholder="common (default) or tenant ID" 
+                                            className={`w-full p-2 text-xs rounded border ${themeClasses.inputBg}`}
+                                        />
+                                    </div>
+                                </div>
+                                <div className="flex justify-end gap-2 pt-1">
+                                    <button 
+                                        onClick={handleSaveAppRegSettings}
+                                        className={`px-3 py-1.5 rounded text-xs font-bold text-white bg-green-600 hover:bg-green-500 cursor-pointer`}
+                                    >
+                                        Save Config
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
     return (
         <div className={`flex h-screen font-sans relative overflow-hidden transition-colors duration-300 ${sidebarOpen ? '' : 'sidebar-closed'} ${themeClasses.appBg}`}>
 
@@ -1070,10 +1347,116 @@ export default function App() {
                     </div>
 
                     {/* Theme Selector Widget */}
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 text-[#2d2a2e] dark:text-[#fcfaf2]">
+                        {/* Microsoft Account Status Widget */}
+                        {storageMode === 'microsoft' && (
+                            <div className="relative">
+                                <button
+                                    onClick={() => setShowMsDropdown(!showMsDropdown)}
+                                    className={`p-2 rounded-xl transition-all duration-300 border active:scale-90 flex items-center gap-2 text-xs font-semibold cursor-pointer ${
+                                        isDark
+                                            ? 'bg-[#3a373a] border-[#4a474a] text-[#a9dc76] hover:bg-[#4a474a]'
+                                            : 'bg-white border-[#e1d5e3] text-[#5c962b] hover:bg-gray-50 shadow-sm'
+                                    }`}
+                                    title="Microsoft 365 Sync Status"
+                                >
+                                    {isSavingMs || msSyncLoading ? (
+                                        <RefreshCw size={16} className="animate-spin text-[#78dce8]" />
+                                    ) : msSaveError ? (
+                                        <AlertCircle size={16} className="text-[#ff6188]" />
+                                    ) : (
+                                        <Cloud size={16} className="text-[#a9dc76]" />
+                                    )}
+                                    <span className="hidden md:inline max-w-[120px] truncate">
+                                        {msAccount ? msAccount.name : 'Sign In'}
+                                    </span>
+                                </button>
+
+                                {showMsDropdown && (
+                                    <div 
+                                        className={`absolute right-0 mt-2 w-64 rounded-2xl shadow-xl border p-4 space-y-3 z-50 animate-in fade-in slide-in-from-top-2 duration-200 ${themeClasses.cardBg}`}
+                                    >
+                                        <div className="flex items-center gap-2 pb-2 border-b border-[#4a474a]/10 dark:border-[#4a474a]/40">
+                                            <div className="p-1.5 rounded-lg bg-blue-500/10 text-blue-500 flex-shrink-0">
+                                                <User size={16} />
+                                            </div>
+                                            <div className="truncate text-left">
+                                                <p className="font-bold text-xs truncate">{msAccount?.name || 'Not signed in'}</p>
+                                                <p className={`text-[10px] truncate ${themeClasses.textMuted}`}>{msAccount?.username || ''}</p>
+                                            </div>
+                                        </div>
+
+                                        <div className="space-y-1.5 text-xs text-left">
+                                            <div className="flex justify-between items-center">
+                                                <span className={themeClasses.textMuted}>Status:</span>
+                                                <span className={`font-bold flex items-center gap-1 ${msSaveError ? 'text-[#ff6188]' : 'text-[#a9dc76]'}`}>
+                                                    {isSavingMs ? 'Syncing changes...' : msSaveError ? 'Sync Error' : 'Cloud Synced'}
+                                                </span>
+                                            </div>
+                                            {lastSyncedTime && (
+                                                <div className="flex justify-between items-center text-[10px]">
+                                                    <span className={themeClasses.textMuted}>Last Synced:</span>
+                                                    <span className="font-semibold text-gray-500">{lastSyncedTime}</span>
+                                                </div>
+                                            )}
+                                            {msSaveError && (
+                                                <p className="text-[10px] text-[#ff6188] leading-tight mt-1">{msSaveError}</p>
+                                            )}
+                                        </div>
+
+                                        <div className="pt-2 border-t border-[#4a474a]/10 dark:border-[#4a474a]/40 flex flex-col gap-1">
+                                            <button
+                                                onClick={async () => {
+                                                    setShowMsDropdown(false);
+                                                    await loadOneDriveData();
+                                                }}
+                                                disabled={msSyncLoading || isSavingMs}
+                                                className={`w-full py-1.5 rounded-lg text-[11px] font-semibold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${themeClasses.btnSecondary}`}
+                                            >
+                                                <RefreshCw size={12} className={msSyncLoading ? 'animate-spin' : ''} /> Force Sync
+                                            </button>
+                                            <button
+                                                onClick={() => {
+                                                    setShowMsDropdown(false);
+                                                    setModals({ ...modals, backup: true });
+                                                }}
+                                                className={`w-full py-1.5 rounded-lg text-[11px] font-semibold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${themeClasses.btnSecondary}`}
+                                            >
+                                                <Settings size={12} /> Sync Settings
+                                            </button>
+                                            <button
+                                                onClick={async () => {
+                                                    setShowMsDropdown(false);
+                                                    await handleSignOutMicrosoft();
+                                                }}
+                                                className={`w-full py-1.5 rounded-lg text-[11px] font-bold transition-all bg-[#ff6188]/20 hover:bg-[#ff6188]/30 border border-[#ff6188]/30 text-[#ff6188] cursor-pointer`}
+                                            >
+                                                Logout & Switch to Local
+                                            </button>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {storageMode === 'browser' && (
+                            <button
+                                onClick={() => setModals({ ...modals, backup: true })}
+                                className={`p-2 rounded-xl transition-all duration-300 border active:scale-90 flex items-center gap-1.5 text-xs font-semibold cursor-pointer ${
+                                    isDark
+                                        ? 'bg-[#3a373a]/50 border-[#4a474a] text-[#fc9867] hover:bg-[#3a373a]'
+                                        : 'bg-white border-[#e1d5e3] text-[#c2410c] hover:bg-gray-50 shadow-sm'
+                                }`}
+                                title="Switched to Local Storage. Click to manage cloud sync settings."
+                            >
+                                <Database size={16} className="text-[#fc9867]" />
+                                <span className="hidden md:inline">Local Browser</span>
+                            </button>
+                        )}
+
                         <button
                             onClick={() => setTheme(isDark ? 'light' : 'dark')}
-                            className={`p-2 rounded-xl transition-all duration-300 border active:scale-90 flex items-center justify-center ${isDark
+                            className={`p-2 rounded-xl transition-all duration-300 border active:scale-90 flex items-center justify-center cursor-pointer ${isDark
                                 ? 'bg-[#3a373a] border-[#4a474a] text-[#ff6188] hover:bg-[#4a474a]'
                                 : 'bg-white border-[#e1d5e3] text-[#e0466a] hover:bg-gray-50 shadow-sm'
                                 }`}
@@ -1481,7 +1864,7 @@ export default function App() {
                             <h3 className={`font-bold text-lg ${isDark ? 'text-[#fc9867]' : 'text-[#c2410c]'}`}>Backup & Restore Data</h3>
                             <button onClick={closeModals} className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-500/10 transition-colors"><X size={20} /></button>
                         </div>
-                        <div className="p-6 space-y-6">
+                        <div className="p-6 space-y-6 overflow-y-auto max-h-[75vh]">
 
                             {/* Export Section */}
                             <div className={`border rounded-xl p-4 text-center space-y-3 shadow-xs bg-gray-50/5 ${themeClasses.border}`}>
@@ -1518,6 +1901,94 @@ export default function App() {
                                         Append Data
                                     </button>
                                 </div>
+                            </div>
+
+                            {/* Microsoft Cloud Sync Section */}
+                            <div className={`border rounded-xl p-4 space-y-3 shadow-xs text-center bg-gray-50/5 ${themeClasses.border}`}>
+                                <div className="flex items-center justify-between border-b pb-2 border-gray-500/10 text-left">
+                                    <div className="flex items-center gap-2">
+                                        <Cloud size={20} className="text-[#a9dc76]" />
+                                        <h4 className="font-semibold text-sm">Microsoft 365 Sync</h4>
+                                    </div>
+                                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                                        storageMode === 'microsoft' 
+                                            ? 'bg-[#a9dc76]/10 text-[#a9dc76]' 
+                                            : 'bg-[#fc9867]/10 text-[#fc9867]'
+                                    }`}>
+                                        {storageMode === 'microsoft' ? 'Active' : 'Inactive'}
+                                    </span>
+                                </div>
+
+                                {storageMode === 'microsoft' ? (
+                                    <div className="space-y-2.5 text-xs text-left">
+                                        <p className="text-[11px] leading-relaxed">
+                                            Your contact groups and history are automatically synced to your OneDrive.
+                                        </p>
+                                        <div className="p-2 rounded-lg bg-black/10 dark:bg-black/20 flex items-center gap-2">
+                                            <User size={14} className="text-[#78dce8] flex-shrink-0" />
+                                            <div className="truncate">
+                                                <p className="font-bold text-[10px] truncate">{msAccount?.name || 'Connected'}</p>
+                                                <p className="text-[9px] text-gray-400 truncate">{msAccount?.username || ''}</p>
+                                            </div>
+                                        </div>
+                                        <button
+                                            onClick={handleSignOutMicrosoft}
+                                            className={`w-full py-2 rounded-lg text-xs font-bold text-white transition-all bg-[#ff6188]/20 hover:bg-[#ff6188]/30 border border-[#ff6188]/30 text-[#ff6188] cursor-pointer`}
+                                        >
+                                            Disconnect Microsoft Account
+                                        </button>
+                                    </div>
+                                ) : (
+                                    <div className="space-y-3 text-xs text-left">
+                                        <p className="text-[11px] leading-relaxed text-gray-600 dark:text-gray-400">
+                                            Connect your district Microsoft account to sync and secure your data in the cloud.
+                                        </p>
+                                        
+                                        <div className="space-y-2">
+                                            <div className="grid grid-cols-1 gap-2">
+                                                <div className="space-y-1">
+                                                    <label className="text-[9px] font-bold block uppercase tracking-wider text-gray-500">Client ID (Application ID)</label>
+                                                    <input
+                                                        type="text"
+                                                        value={msClientId}
+                                                        onChange={(e) => setMsClientId(e.target.value)}
+                                                        placeholder="Enter Azure Client ID"
+                                                        className={`w-full p-2 text-xs rounded border ${themeClasses.inputBg}`}
+                                                    />
+                                                </div>
+                                                <div className="space-y-1">
+                                                    <label className="text-[9px] font-bold block uppercase tracking-wider text-gray-500">Tenant ID</label>
+                                                    <input
+                                                        type="text"
+                                                        value={msTenantId}
+                                                        onChange={(e) => setMsTenantId(e.target.value)}
+                                                        placeholder="common or specific tenant ID"
+                                                        className={`w-full p-2 text-xs rounded border ${themeClasses.inputBg}`}
+                                                    />
+                                                </div>
+                                            </div>
+                                            <p className="text-[9px] text-gray-500 leading-normal">
+                                                Redirect URI registered in Azure: <code className="bg-black/10 px-1 py-0.5 rounded font-mono">{window.location.origin}/</code>
+                                            </p>
+                                        </div>
+
+                                        <div className="grid grid-cols-2 gap-2 pt-1">
+                                            <button
+                                                onClick={handleSaveAppRegSettings}
+                                                className={`py-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${themeClasses.btnSecondary}`}
+                                            >
+                                                Save Config
+                                            </button>
+                                            <button
+                                                onClick={() => handleSignInMicrosoft()}
+                                                disabled={!msClientId}
+                                                className={`py-2 rounded-lg text-xs font-bold text-white transition-all bg-blue-600 hover:bg-blue-500 disabled:bg-gray-400 disabled:cursor-not-allowed cursor-pointer`}
+                                            >
+                                                Connect & Log In
+                                            </button>
+                                        </div>
+                                    </div>
+                                )}
                             </div>
 
                         </div>
