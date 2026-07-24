@@ -16,6 +16,123 @@ const formatDate = (dateString) => {
     return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 };
 
+// --- Web Crypto Encryption Utilities for FIPPA Compliant Backups ---
+const deriveKey = async (password, salt) => {
+    const enc = new TextEncoder();
+    const keyMaterial = await crypto.subtle.importKey(
+        "raw",
+        enc.encode(password),
+        { name: "PBKDF2" },
+        false,
+        ["deriveKey"]
+    );
+    return crypto.subtle.deriveKey(
+        {
+            name: "PBKDF2",
+            salt: salt,
+            iterations: 100000,
+            hash: "SHA-256"
+        },
+        keyMaterial,
+        { name: "AES-GCM", length: 256 },
+        false,
+        ["encrypt", "decrypt"]
+    );
+};
+
+const encryptData = async (dataObject, password) => {
+    const enc = new TextEncoder();
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const key = await deriveKey(password, salt);
+    const encodedData = enc.encode(JSON.stringify(dataObject));
+    const encryptedContent = await crypto.subtle.encrypt(
+        { name: "AES-GCM", iv: iv },
+        key,
+        encodedData
+    );
+
+    // Combine salt + iv + encryptedContent into a single base64 string or envelope object
+    return JSON.stringify({
+        encrypted: true,
+        version: 1,
+        salt: Array.from(salt),
+        iv: Array.from(iv),
+        ciphertext: Array.from(new Uint8Array(encryptedContent))
+    });
+};
+
+const decryptData = async (envelope, password) => {
+    if (!envelope || !envelope.encrypted || !envelope.ciphertext) {
+        throw new Error("Invalid encrypted format");
+    }
+    const salt = new Uint8Array(envelope.salt);
+    const iv = new Uint8Array(envelope.iv);
+    const ciphertext = new Uint8Array(envelope.ciphertext);
+    const key = await deriveKey(password, salt);
+    const decryptedBuffer = await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv: iv },
+        key,
+        ciphertext
+    );
+    const dec = new TextDecoder();
+    return JSON.parse(dec.decode(decryptedBuffer));
+};
+
+// --- IndexedDB Auto-Backup Utility ---
+const DB_NAME = 'BatchEmailerDB';
+const DB_VERSION = 1;
+const STORE_NAME = 'auto_backups';
+
+const initIDB = () => {
+    return new Promise((resolve, reject) => {
+        if (!window.indexedDB) {
+            reject(new Error("IndexedDB not supported"));
+            return;
+        }
+        const request = window.indexedDB.open(DB_NAME, DB_VERSION);
+        request.onupgradeneeded = (event) => {
+            const db = event.target.result;
+            if (!db.objectStoreNames.contains(STORE_NAME)) {
+                db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+            }
+        };
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+};
+
+const saveAutoBackupToIDB = async (dataToSave) => {
+    try {
+        const db = await initIDB();
+        const tx = db.transaction(STORE_NAME, 'readwrite');
+        const store = tx.objectStore(STORE_NAME);
+        store.put({
+            id: 'latest_auto_backup',
+            timestamp: new Date().toISOString(),
+            data: dataToSave
+        });
+    } catch (err) {
+        console.warn("Failed to write auto-backup to IndexedDB:", err);
+    }
+};
+
+const getAutoBackupFromIDB = async () => {
+    try {
+        const db = await initIDB();
+        return new Promise((resolve) => {
+            const tx = db.transaction(STORE_NAME, 'readonly');
+            const store = tx.objectStore(STORE_NAME);
+            const request = store.get('latest_auto_backup');
+            request.onsuccess = () => resolve(request.result || null);
+            request.onerror = () => resolve(null);
+        });
+    } catch (err) {
+        console.warn("Failed to read auto-backup from IndexedDB:", err);
+        return null;
+    }
+};
+
 // --- Local CSV Parser Utility ---
 const parseCSV = (text) => {
     const lines = [];
@@ -167,6 +284,21 @@ export default function App() {
             }
         }
     }, [data, setData]);
+
+    // Automatic Browser Backup to IndexedDB on data changes (Feature #3)
+    useEffect(() => {
+        if (data && (data.folders.length > 0 || data.classes.length > 0 || data.students.length > 0)) {
+            saveAutoBackupToIDB(data);
+        }
+    }, [data]);
+
+    // Password & Encrypted Import State for FIPPA Compliant Backups
+    const [exportPassword, setExportPassword] = useState('');
+    const [exportPasswordConfirm, setExportPasswordConfirm] = useState('');
+    const [importPassword, setImportPassword] = useState('');
+    const [pendingImportFile, setPendingImportFile] = useState(null);
+    const [pendingImportMode, setPendingImportMode] = useState(null); // 'replace' | 'append'
+    const [showImportPasswordPrompt, setShowImportPasswordPrompt] = useState(false);
 
     // Handle auto-collapsing sidebar on mount for smaller mobile screens
     useEffect(() => {
@@ -507,6 +639,12 @@ export default function App() {
     const closeModals = () => {
         setModals({ folder: false, class: false, student: false, bulkAdd: false, draftEmail: false, backup: false, changelog: false });
         setEditingItem(null);
+        setExportPassword('');
+        setExportPasswordConfirm('');
+        setImportPassword('');
+        setPendingImportFile(null);
+        setPendingImportMode(null);
+        setShowImportPasswordPrompt(false);
     };
 
     const openEditModal = (type, item) => {
@@ -760,94 +898,144 @@ export default function App() {
         }
     };
 
-    // --- Export / Import Logic ---
-    const handleExportStr = () => {
-        const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(data, null, 2));
-        const downloadAnchorNode = document.createElement('a');
-        downloadAnchorNode.setAttribute("href", dataStr);
-        downloadAnchorNode.setAttribute("download", `batch_emailer_backup_${new Date().toISOString().split('T')[0]}.json`);
-        document.body.appendChild(downloadAnchorNode);
-        downloadAnchorNode.click();
-        downloadAnchorNode.remove();
+    // --- Export / Import Logic with AES-256 Encryption ---
+    const handleExportBackup = async () => {
+        if (!exportPassword) {
+            showAlert("Password Required", "Please enter a password to encrypt your backup file for FIPPA compliance.");
+            return;
+        }
+        if (exportPassword !== exportPasswordConfirm) {
+            showAlert("Password Mismatch", "The passwords you entered do not match. Please verify your password.");
+            return;
+        }
+        try {
+            const encryptedJsonStr = await encryptData(data, exportPassword);
+            const blob = new Blob([encryptedJsonStr], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const downloadAnchorNode = document.createElement('a');
+            downloadAnchorNode.setAttribute("href", url);
+            downloadAnchorNode.setAttribute("download", `batch_emailer_backup_${new Date().toISOString().split('T')[0]}.json`);
+            document.body.appendChild(downloadAnchorNode);
+            downloadAnchorNode.click();
+            downloadAnchorNode.remove();
+            URL.revokeObjectURL(url);
+            setExportPassword('');
+            setExportPasswordConfirm('');
+            showAlert("Backup Created", "Your backup file has been encrypted and downloaded successfully. Please store your password securely, as you will need it to import this backup in the future.");
+        } catch (err) {
+            console.error("Encryption error:", err);
+            showAlert("Export Failed", "Could not encrypt backup file. Please try again.");
+        }
     };
 
-    const handleImportStr = (e, mode) => {
-        const fileReader = new FileReader();
-        if (!e.target.files[0]) return;
+    const processImportData = (importedData, mode) => {
+        if (!importedData.folders || !importedData.classes || !importedData.students) {
+            throw new Error("Invalid file structure");
+        }
 
-        fileReader.readAsText(e.target.files[0], "UTF-8");
-        fileReader.onload = e => {
-            try {
-                let importedData = JSON.parse(e.target.result);
-                if (!importedData.folders || !importedData.classes || !importedData.students) {
-                    throw new Error("Invalid file format");
+        // Schema migration for imported datasets
+        importedData.students = importedData.students.map(student => {
+            let updatedStudent = { ...student };
+
+            if (!updatedStudent.emails) {
+                const emails = [];
+                if (updatedStudent.email1 && updatedStudent.email1.trim()) emails.push(updatedStudent.email1.trim());
+                if (updatedStudent.email2 && updatedStudent.email2.trim()) emails.push(updatedStudent.email2.trim());
+                if (emails.length === 0) emails.push('');
+                updatedStudent.emails = emails;
+            }
+
+            if (!updatedStudent.emailHistory) {
+                const history = [];
+                if (updatedStudent.message || updatedStudent.timestamp) {
+                    history.push({
+                        id: generateId(),
+                        timestamp: updatedStudent.timestamp || new Date().toISOString(),
+                        message: updatedStudent.message || ''
+                    });
                 }
+                updatedStudent.emailHistory = history;
+            }
+            return updatedStudent;
+        });
 
-                // Schema migration for imported datasets
-                importedData.students = importedData.students.map(student => {
-                    let updatedStudent = { ...student };
+        if (mode === 'replace') {
+            showConfirm("Replace Data", "WARNING: This will completely replace all your current data. Are you sure?", () => {
+                setData(importedData);
+                setActiveFolderId(null);
+                setActiveClassId(null);
+                closeModals();
+                showAlert("Success", "Data replaced successfully.");
+            });
+        } else if (mode === 'append') {
+            const newFolders = [];
+            const newClasses = [];
+            const newStudents = [];
 
-                    if (!updatedStudent.emails) {
-                        const emails = [];
-                        if (updatedStudent.email1 && updatedStudent.email1.trim()) emails.push(updatedStudent.email1.trim());
-                        if (updatedStudent.email2 && updatedStudent.email2.trim()) emails.push(updatedStudent.email2.trim());
-                        if (emails.length === 0) emails.push('');
-                        updatedStudent.emails = emails;
-                    }
+            importedData.folders.forEach(f => {
+                const newFId = generateId();
+                newFolders.push({ ...f, id: newFId });
 
-                    if (!updatedStudent.emailHistory) {
-                        const history = [];
-                        if (updatedStudent.message || updatedStudent.timestamp) {
-                            history.push({
-                                id: generateId(),
-                                timestamp: updatedStudent.timestamp || new Date().toISOString(),
-                                message: updatedStudent.message || ''
-                            });
-                        }
-                        updatedStudent.emailHistory = history;
-                    }
-                    return updatedStudent;
+                importedData.classes.filter(c => c.folderId === f.id).forEach(c => {
+                    const newCId = generateId();
+                    newClasses.push({ ...c, id: newCId, folderId: newFId });
+
+                    importedData.students.filter(s => s.classId === c.id).forEach(s => {
+                        newStudents.push({ ...s, id: generateId(), classId: newCId });
+                    });
                 });
+            });
 
-                if (mode === 'replace') {
-                    showConfirm("Replace Data", "WARNING: This will completely replace all your current data. Are you sure?", () => {
-                        setData(importedData);
-                        setActiveFolderId(null);
-                        setActiveClassId(null);
-                        closeModals();
-                        showAlert("Success", "Data replaced successfully.");
-                    });
-                } else if (mode === 'append') {
-                    const newFolders = [];
-                    const newClasses = [];
-                    const newStudents = [];
+            setData(prev => ({
+                folders: [...prev.folders, ...newFolders],
+                classes: [...prev.classes, ...newClasses],
+                students: [...prev.students, ...newStudents]
+            }));
+            closeModals();
+            showAlert("Success", "Data appended successfully.");
+        }
+    };
 
-                    importedData.folders.forEach(f => {
-                        const newFId = generateId();
-                        newFolders.push({ ...f, id: newFId });
+    const handleFileSelect = (e, mode) => {
+        const file = e.target.files[0];
+        if (!file) return;
 
-                        importedData.classes.filter(c => c.folderId === f.id).forEach(c => {
-                            const newCId = generateId();
-                            newClasses.push({ ...c, id: newCId, folderId: newFId });
-
-                            importedData.students.filter(s => s.classId === c.id).forEach(s => {
-                                newStudents.push({ ...s, id: generateId(), classId: newCId });
-                            });
-                        });
-                    });
-
-                    setData(prev => ({
-                        folders: [...prev.folders, ...newFolders],
-                        classes: [...prev.classes, ...newClasses],
-                        students: [...prev.students, ...newStudents]
-                    }));
-                    closeModals();
-                    showAlert("Success", "Data appended successfully.");
+        const fileReader = new FileReader();
+        fileReader.readAsText(file, "UTF-8");
+        fileReader.onload = async (evt) => {
+            try {
+                const parsed = JSON.parse(evt.target.result);
+                if (parsed && parsed.encrypted) {
+                    // File is encrypted, prompt user for password
+                    setPendingImportFile(parsed);
+                    setPendingImportMode(mode);
+                    setShowImportPasswordPrompt(true);
+                    setImportPassword('');
+                } else {
+                    // Unencrypted / Legacy JSON file support
+                    processImportData(parsed, mode);
                 }
             } catch (err) {
                 showAlert("Error", "Error importing file. Please ensure it is a valid backup file.");
             }
         };
+    };
+
+    const handleDecryptAndImport = async () => {
+        if (!importPassword) {
+            showAlert("Password Required", "Please enter the decryption password for this backup file.");
+            return;
+        }
+        try {
+            const decryptedData = await decryptData(pendingImportFile, importPassword);
+            processImportData(decryptedData, pendingImportMode);
+            setShowImportPasswordPrompt(false);
+            setImportPassword('');
+            setPendingImportFile(null);
+            setPendingImportMode(null);
+        } catch (err) {
+            showAlert("Decryption Failed", "Incorrect password or corrupted backup file. Please verify the password and try again.");
+        }
     };
 
     // Theme Constants (Monokai Pro inspired)
@@ -1484,40 +1672,103 @@ export default function App() {
                         <div className="p-6 space-y-6">
 
                             {/* Export Section */}
-                            <div className={`border rounded-xl p-4 text-center space-y-3 shadow-xs bg-gray-50/5 ${themeClasses.border}`}>
-                                <Download size={32} className="mx-auto text-blue-500 animate-pulse" />
-                                <h4 className="font-semibold">Export Backup</h4>
-                                <p className="text-xs text-gray-600 dark:text-gray-400 font-medium">Save a privacy-compliant local JSON backup to your computer.</p>
-                                <button onClick={handleExportStr} className={`w-full py-2.5 rounded-lg text-xs font-bold transition-all active:scale-95 ${themeClasses.btnPrimary}`}>
-                                    Download JSON Backup
+                            <div className={`border rounded-xl p-4 text-left space-y-3 shadow-xs bg-gray-50/5 ${themeClasses.border}`}>
+                                <div className="flex items-center space-x-2">
+                                    <Download size={24} className="text-blue-500" />
+                                    <h4 className="font-semibold text-sm">Export Encrypted Backup</h4>
+                                </div>
+                                <p className="text-xs text-gray-600 dark:text-gray-400 font-medium">
+                                    Encrypts your data with AES-256 before saving to disk to meet FIPPA privacy standards.
+                                </p>
+                                
+                                <div className="p-2.5 bg-amber-500/10 border border-amber-500/30 rounded-lg flex items-start space-x-2 text-xs text-amber-700 dark:text-amber-300">
+                                    <AlertCircle size={16} className="shrink-0 mt-0.5" />
+                                    <span><strong>Important:</strong> Keep track of this password! You will need it to restore or import this backup later.</span>
+                                </div>
+
+                                <div className="space-y-2 pt-1">
+                                    <div>
+                                        <label className="block text-[11px] font-bold text-gray-600 dark:text-gray-300 mb-1">Set Backup Password</label>
+                                        <input
+                                            type="password"
+                                            value={exportPassword}
+                                            onChange={(e) => setExportPassword(e.target.value)}
+                                            placeholder="Enter a strong password"
+                                            className={`w-full text-xs p-2.5 rounded-lg border outline-none transition-all ${themeClasses.inputBg}`}
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-[11px] font-bold text-gray-600 dark:text-gray-300 mb-1">Confirm Password</label>
+                                        <input
+                                            type="password"
+                                            value={exportPasswordConfirm}
+                                            onChange={(e) => setExportPasswordConfirm(e.target.value)}
+                                            placeholder="Confirm password"
+                                            className={`w-full text-xs p-2.5 rounded-lg border outline-none transition-all ${themeClasses.inputBg}`}
+                                        />
+                                    </div>
+                                </div>
+
+                                <button onClick={handleExportBackup} className={`w-full py-2.5 rounded-lg text-xs font-bold transition-all active:scale-95 ${themeClasses.btnPrimary}`}>
+                                    Download Encrypted Backup
                                 </button>
                             </div>
 
                             {/* Import Section */}
-                            <div className={`border rounded-xl p-4 text-center space-y-3 shadow-xs bg-gray-50/5 ${themeClasses.border}`}>
-                                <Upload size={32} className="mx-auto text-green-500" />
-                                <h4 className="font-semibold">Restore Data</h4>
-                                <p className="text-xs text-gray-600 dark:text-gray-400 font-medium">Upload a previous JSON backup file.</p>
-                                <div className="grid grid-cols-2 gap-2 mt-2">
-                                    <button onClick={(e) => {
-                                        const input = document.createElement('input');
-                                        input.type = 'file';
-                                        input.accept = '.json';
-                                        input.onchange = (evt) => handleImportStr(evt, 'replace');
-                                        input.click();
-                                    }} className={`py-2 px-2 rounded-lg text-xs font-bold transition-all active:scale-95 ${themeClasses.btnSecondary}`}>
-                                        Replace All Data
-                                    </button>
-                                    <button onClick={() => {
-                                        const input = document.createElement('input');
-                                        input.type = 'file';
-                                        input.accept = '.json';
-                                        input.onchange = (evt) => handleImportStr(evt, 'append');
-                                        input.click();
-                                    }} className={`py-2 px-2 rounded-lg text-xs font-bold transition-all active:scale-95 ${themeClasses.btnSecondary}`}>
-                                        Append Data
-                                    </button>
+                            <div className={`border rounded-xl p-4 text-left space-y-3 shadow-xs bg-gray-50/5 ${themeClasses.border}`}>
+                                <div className="flex items-center space-x-2">
+                                    <Upload size={24} className="text-green-500" />
+                                    <h4 className="font-semibold text-sm">Restore Data</h4>
                                 </div>
+                                <p className="text-xs text-gray-600 dark:text-gray-400 font-medium">Upload an encrypted or legacy backup file.</p>
+                                
+                                {!showImportPasswordPrompt ? (
+                                    <div className="grid grid-cols-2 gap-2 mt-2">
+                                        <button onClick={() => {
+                                            const input = document.createElement('input');
+                                            input.type = 'file';
+                                            input.accept = '.json';
+                                            input.onchange = (evt) => handleFileSelect(evt, 'replace');
+                                            input.click();
+                                        }} className={`py-2 px-2 rounded-lg text-xs font-bold transition-all active:scale-95 ${themeClasses.btnSecondary}`}>
+                                            Replace All Data
+                                        </button>
+                                        <button onClick={() => {
+                                            const input = document.createElement('input');
+                                            input.type = 'file';
+                                            input.accept = '.json';
+                                            input.onchange = (evt) => handleFileSelect(evt, 'append');
+                                            input.click();
+                                        }} className={`py-2 px-2 rounded-lg text-xs font-bold transition-all active:scale-95 ${themeClasses.btnSecondary}`}>
+                                            Append Data
+                                        </button>
+                                    </div>
+                                ) : (
+                                    <div className="space-y-3 pt-2 border-t border-gray-500/20">
+                                        <label className="block text-[11px] font-bold text-gray-600 dark:text-gray-300">Enter Backup Decryption Password</label>
+                                        <input
+                                            type="password"
+                                            value={importPassword}
+                                            onChange={(e) => setImportPassword(e.target.value)}
+                                            placeholder="Enter password used when exporting"
+                                            className={`w-full text-xs p-2.5 rounded-lg border outline-none transition-all ${themeClasses.inputBg}`}
+                                            autoFocus
+                                        />
+                                        <div className="flex space-x-2">
+                                            <button onClick={handleDecryptAndImport} className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all active:scale-95 ${themeClasses.btnPrimary}`}>
+                                                Decrypt & Import
+                                            </button>
+                                            <button onClick={() => {
+                                                setShowImportPasswordPrompt(false);
+                                                setImportPassword('');
+                                                setPendingImportFile(null);
+                                                setPendingImportMode(null);
+                                            }} className={`py-2 px-3 rounded-lg text-xs font-bold transition-all ${themeClasses.btnSecondary}`}>
+                                                Cancel
+                                            </button>
+                                        </div>
+                                    </div>
+                                )}
                             </div>
 
                         </div>
