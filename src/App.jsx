@@ -1680,7 +1680,7 @@ export default function App() {
                                 <p className="text-xs text-gray-600 dark:text-gray-400 font-medium">
                                     Encrypts your data with AES-256 before saving to disk to meet FIPPA privacy standards.
                                 </p>
-                                
+
                                 <div className="p-2.5 bg-amber-500/10 border border-amber-500/30 rounded-lg flex items-start space-x-2 text-xs text-amber-700 dark:text-amber-300">
                                     <AlertCircle size={16} className="shrink-0 mt-0.5" />
                                     <span><strong>Important:</strong> Keep track of this password! You will need it to restore or import this backup later.</span>
@@ -1721,7 +1721,7 @@ export default function App() {
                                     <h4 className="font-semibold text-sm">Restore Data</h4>
                                 </div>
                                 <p className="text-xs text-gray-600 dark:text-gray-400 font-medium">Upload an encrypted or legacy backup file.</p>
-                                
+
                                 {!showImportPasswordPrompt ? (
                                     <div className="grid grid-cols-2 gap-2 mt-2">
                                         <button onClick={() => {
@@ -1798,7 +1798,7 @@ export default function App() {
                             </div>
                             <div className="space-y-2">
                                 <div className="flex items-center justify-between">
-                                    <span className="text-sm font-bold text-gray-400">v1.2</span>
+                                    <span className="text-sm font-bold text-[#a9dc76]">v1.2</span>
                                     <span className="text-[10px] text-gray-500 font-mono">2026-06-30</span>
                                 </div>
                                 <ul className="list-disc pl-4 text-xs space-y-1 text-gray-600 dark:text-gray-400">
