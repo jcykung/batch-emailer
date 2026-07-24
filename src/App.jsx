@@ -1230,7 +1230,7 @@ export default function App() {
                                         className="text-[10px] font-mono text-[#ab9df2] bg-[#ab9df2]/10 border border-[#ab9df2]/20 px-1.5 py-0.5 rounded cursor-pointer hover:bg-[#ab9df2]/20 hover:text-white transition-colors"
                                         title="View Changelog"
                                     >
-                                        v1.2
+                                        v1.3
                                     </span>
                                 </span>
                                 {currentClass && (
@@ -1787,7 +1787,18 @@ export default function App() {
                         <div className="p-6 space-y-4">
                             <div className="space-y-2">
                                 <div className="flex items-center justify-between">
-                                    <span className="text-sm font-bold text-[#a9dc76]">v1.2</span>
+                                    <span className="text-sm font-bold text-[#a9dc76]">v1.3</span>
+                                    <span className="text-[10px] text-gray-500 font-mono">2026-07-23</span>
+                                </div>
+                                <ul className="list-disc pl-4 text-xs space-y-1 text-gray-600 dark:text-gray-400">
+                                    <li>FIPPA Compliance: Added AES-256 password-based Web Crypto encryption for exported backup files with password confirmation & recovery reminders.</li>
+                                    <li>FIPPA Compliance: Added automatic background IndexedDB backups (`BatchEmailerDB`) for zero-friction data protection without UI lag.</li>
+                                    <li>Support for importing both encrypted backups and legacy unencrypted JSON backup files.</li>
+                                </ul>
+                            </div>
+                            <div className="space-y-2">
+                                <div className="flex items-center justify-between">
+                                    <span className="text-sm font-bold text-gray-400">v1.2</span>
                                     <span className="text-[10px] text-gray-500 font-mono">2026-06-30</span>
                                 </div>
                                 <ul className="list-disc pl-4 text-xs space-y-1 text-gray-600 dark:text-gray-400">
