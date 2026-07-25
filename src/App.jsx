@@ -102,22 +102,33 @@ const initIDB = () => {
     });
 };
 
-const saveAutoBackupToIDB = async (dataToSave) => {
+const saveAutoBackupToIDB = async (dataToSave, password) => {
     try {
         const db = await initIDB();
         const tx = db.transaction(STORE_NAME, 'readwrite');
         const store = tx.objectStore(STORE_NAME);
-        store.put({
-            id: 'latest_auto_backup',
-            timestamp: new Date().toISOString(),
-            data: dataToSave
-        });
+        let envelope;
+        if (password) {
+            const encrypted = await encryptData(dataToSave, password);
+            envelope = {
+                id: 'latest_auto_backup',
+                timestamp: new Date().toISOString(),
+                ...JSON.parse(encrypted)
+            };
+        } else {
+            envelope = {
+                id: 'latest_auto_backup',
+                timestamp: new Date().toISOString(),
+                data: dataToSave
+            };
+        }
+        store.put(envelope);
     } catch (err) {
         console.warn("Failed to write auto-backup to IndexedDB:", err);
     }
 };
 
-const getAutoBackupFromIDB = async () => {
+const getRawAutoBackupFromIDB = async () => {
     try {
         const db = await initIDB();
         return new Promise((resolve) => {
@@ -127,6 +138,20 @@ const getAutoBackupFromIDB = async () => {
             request.onsuccess = () => resolve(request.result || null);
             request.onerror = () => resolve(null);
         });
+    } catch (err) {
+        return null;
+    }
+};
+
+const getAutoBackupFromIDB = async (password) => {
+    try {
+        const raw = await getRawAutoBackupFromIDB();
+        if (!raw) return null;
+        if (raw.encrypted === true) {
+            if (!password) return null;
+            return await decryptData(raw, password);
+        }
+        return raw.data || raw;
     } catch (err) {
         console.warn("Failed to read auto-backup from IndexedDB:", err);
         return null;
@@ -221,7 +246,8 @@ export default function App() {
         bulkAdd: false, // Unified Import Modal
         draftEmail: false,
         backup: false,
-        changelog: false
+        changelog: false,
+        privacy: false
     });
 
     // Custom Dialog Alert/Confirm State to bypass restricted environment popups
@@ -288,9 +314,37 @@ export default function App() {
     // Automatic Browser Backup to IndexedDB on data changes (Feature #3)
     useEffect(() => {
         if (data && (data.folders.length > 0 || data.classes.length > 0 || data.students.length > 0)) {
-            saveAutoBackupToIDB(data);
+            saveAutoBackupToIDB(data, autoBackupPasswordRef.current);
         }
     }, [data]);
+
+    // Auto-Backup Encryption: Check IndexedDB on mount to determine encryption status
+    useEffect(() => {
+        const checkAutoBackupEncryption = async () => {
+            try {
+                const raw = await getRawAutoBackupFromIDB();
+                if (!raw) {
+                    setAutoBackupStatus('ready');
+                    return;
+                }
+                if (raw.encrypted === true) {
+                    setAutoBackupMode('unlock');
+                    setShowAutoBackupPasswordPrompt(true);
+                } else {
+                    const hasData = raw.folders?.length > 0 || raw.classes?.length > 0 || raw.students?.length > 0;
+                    if (hasData) {
+                        setAutoBackupMode('setup');
+                        setShowAutoBackupPasswordPrompt(true);
+                    } else {
+                        setAutoBackupStatus('ready');
+                    }
+                }
+            } catch {
+                setAutoBackupStatus('ready');
+            }
+        };
+        checkAutoBackupEncryption();
+    }, []);
 
     // Password & Encrypted Import State for FIPPA Compliant Backups
     const [exportPassword, setExportPassword] = useState('');
@@ -299,6 +353,14 @@ export default function App() {
     const [pendingImportFile, setPendingImportFile] = useState(null);
     const [pendingImportMode, setPendingImportMode] = useState(null); // 'replace' | 'append'
     const [showImportPasswordPrompt, setShowImportPasswordPrompt] = useState(false);
+
+    // Auto-Backup Encryption State
+    const autoBackupPasswordRef = useRef(null);
+    const [showAutoBackupPasswordPrompt, setShowAutoBackupPasswordPrompt] = useState(false);
+    const [autoBackupPassword, setAutoBackupPassword] = useState('');
+    const [autoBackupPasswordConfirm, setAutoBackupPasswordConfirm] = useState('');
+    const [autoBackupMode, setAutoBackupMode] = useState(null); // 'setup' | 'unlock'
+    const [autoBackupStatus, setAutoBackupStatus] = useState('pending'); // 'pending' | 'ready' | 'skipped'
 
     // Handle auto-collapsing sidebar on mount for smaller mobile screens
     useEffect(() => {
@@ -637,7 +699,7 @@ export default function App() {
     };
 
     const closeModals = () => {
-        setModals({ folder: false, class: false, student: false, bulkAdd: false, draftEmail: false, backup: false, changelog: false });
+        setModals({ folder: false, class: false, student: false, bulkAdd: false, draftEmail: false, backup: false, changelog: false, privacy: false });
         setEditingItem(null);
         setExportPassword('');
         setExportPasswordConfirm('');
@@ -645,6 +707,7 @@ export default function App() {
         setPendingImportFile(null);
         setPendingImportMode(null);
         setShowImportPasswordPrompt(false);
+        // Note: auto-backup password prompt is not closed here — it's a system-level prompt
     };
 
     const openEditModal = (type, item) => {
@@ -1038,6 +1101,66 @@ export default function App() {
         }
     };
 
+    // Auto-Backup Encryption Handlers
+    const handleSetAutoBackupPassword = async () => {
+        if (!autoBackupPassword) {
+            showAlert("Password Required", "Please enter a password to encrypt your auto-backups.");
+            return;
+        }
+        if (autoBackupPassword !== autoBackupPasswordConfirm) {
+            showAlert("Password Mismatch", "The passwords you entered do not match.");
+            return;
+        }
+        autoBackupPasswordRef.current = autoBackupPassword;
+        setAutoBackupStatus('ready');
+        setShowAutoBackupPasswordPrompt(false);
+        setAutoBackupPassword('');
+        setAutoBackupPasswordConfirm('');
+        // Re-encrypt existing backup with the new password
+        if (data && (data.folders.length > 0 || data.classes.length > 0 || data.students.length > 0)) {
+            await saveAutoBackupToIDB(data, autoBackupPassword);
+        }
+        showAlert("Auto-Backups Encrypted", "Your auto-backups are now encrypted with AES-256. You will need this password on future visits.");
+    };
+
+    const handleDecryptAutoBackup = async () => {
+        if (!autoBackupPassword) {
+            showAlert("Password Required", "Please enter your auto-backup encryption password.");
+            return;
+        }
+        try {
+            const raw = await getRawAutoBackupFromIDB();
+            if (raw && raw.encrypted) {
+                const decrypted = await decryptData(raw, autoBackupPassword);
+                // Verify decryption produced valid data
+                if (decrypted && (decrypted.folders || decrypted.classes || decrypted.students)) {
+                    autoBackupPasswordRef.current = autoBackupPassword;
+                    setAutoBackupStatus('ready');
+                    setShowAutoBackupPasswordPrompt(false);
+                    setAutoBackupPassword('');
+                } else {
+                    showAlert("Decryption Failed", "Incorrect password or corrupted backup. Please try again.");
+                }
+            } else {
+                // No encrypted backup, just set the password
+                autoBackupPasswordRef.current = autoBackupPassword;
+                setAutoBackupStatus('ready');
+                setShowAutoBackupPasswordPrompt(false);
+                setAutoBackupPassword('');
+            }
+        } catch {
+            showAlert("Decryption Failed", "Incorrect password or corrupted backup. Please try again.");
+        }
+    };
+
+    const handleSkipAutoBackupEncryption = () => {
+        autoBackupPasswordRef.current = null;
+        setAutoBackupStatus('skipped');
+        setShowAutoBackupPasswordPrompt(false);
+        setAutoBackupPassword('');
+        setAutoBackupPasswordConfirm('');
+    };
+
     // Theme Constants (Monokai Pro inspired)
     const isDark = theme === 'dark';
     const themeClasses = {
@@ -1107,6 +1230,14 @@ export default function App() {
                         <RefreshCw size={18} /> Backup / Restore
                     </button>
                 </div>
+
+                {/* Privacy Policy Link */}
+                <button
+                    onClick={() => setModals({ ...modals, privacy: true })}
+                    className={`mx-4 mt-2 mb-0 flex items-center justify-center gap-2 py-2 rounded-lg text-xs font-bold transition-all active:scale-[0.98] ${isDark ? 'text-[#78dce8] hover:bg-[#78dce8]/10' : 'text-[#2188a0] hover:bg-[#78dce8]/15'}`}
+                >
+                    <FileText size={14} /> Privacy Policy
+                </button>
 
                 {/* Sidebar Backup Reminder Alert */}
                 <div className={`px-4 py-3 mx-4 mt-2 mb-1 rounded-xl border flex gap-2.5 items-start text-xs leading-relaxed ${isDark ? 'bg-[#fc9867]/10 border-[#fc9867]/30 text-[#fc9867]' : 'bg-[#f6c445]/10 border-[#f6c445]/30 text-[#8a5d1b]'
@@ -1840,6 +1971,97 @@ export default function App() {
                 </div>
             )}
 
+            {/* Privacy Policy Modal */}
+            {modals.privacy && (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 backdrop-blur-xs">
+                    <div className={`rounded-2xl shadow-xl w-full max-w-lg overflow-hidden border animate-in fade-in zoom-in-95 duration-200 ${themeClasses.cardBg}`}>
+                        <div className="p-4 border-b flex justify-between items-center bg-gray-50/5">
+                            <h3 className={`font-bold text-lg ${themeClasses.textAccent}`}>Privacy Policy</h3>
+                            <button onClick={closeModals} className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-500/10 transition-colors"><X size={20} /></button>
+                        </div>
+                        <div className="p-6 space-y-4 max-h-[60vh] overflow-y-auto text-xs leading-relaxed">
+                            {/* Overview */}
+                            <div>
+                                <p className="font-semibold mb-1">Overview</p>
+                                <p className={`${themeClasses.textSecondary}`}>
+                                    Batch Emailer is a client-side web application for contact management and batch email drafting. This policy explains what data is collected, how it is stored and protected, and your rights regarding that data.
+                                </p>
+                            </div>
+
+                            {/* Data Collected */}
+                            <div>
+                                <p className="font-semibold mb-1">Data Collected</p>
+                                <div className={`${themeClasses.textSecondary} space-y-0.5`}>
+                                    <p>Batch Emailer collects the following personal information that you enter:</p>
+                                    <ul className="list-disc pl-4 space-y-0.5 mt-1">
+                                        <li><strong>Contact names</strong></li>
+                                        <li><strong>Email addresses</strong> (one or more per contact)</li>
+                                        <li><strong>Notes</strong> (free-text field for additional details)</li>
+                                        <li><strong>Communication history</strong> (timestamps and message content)</li>
+                                        <li><strong>Group/folder organization</strong> (names and structure you create)</li>
+                                    </ul>
+                                </div>
+                            </div>
+
+                            {/* How Data Is Stored */}
+                            <div>
+                                <p className="font-semibold mb-1">How Data Is Stored</p>
+                                <p className={`${themeClasses.textSecondary}`}>
+                                    All data is stored <strong>exclusively in your browser</strong> using localStorage (active data) and IndexedDB (automatic backups). No data is transmitted to any server, cloud service, or third party.
+                                </p>
+                            </div>
+
+                            {/* Data Protection */}
+                            <div>
+                                <p className="font-semibold mb-1">Data Protection</p>
+                                <div className={`${themeClasses.textSecondary} space-y-1`}>
+                                    <p><strong>Encryption at Rest:</strong> Exported backup files use AES-256-GCM with PBKDF2 key derivation. Automatic IndexedDB backups use the same AES-256-GCM standard when you set an encryption password.</p>
+                                    <p><strong>Access Control:</strong> Data is accessible to anyone with physical or browser access to your device. No account system, no login, no remote access.</p>
+                                </div>
+                            </div>
+
+                            {/* Data Retention */}
+                            <div>
+                                <p className="font-semibold mb-1">Data Retention</p>
+                                <p className={`${themeClasses.textSecondary}`}>
+                                    Data is retained until you manually delete it or clear browser storage. No automatic expiration. You can delete all data at any time.
+                                </p>
+                            </div>
+
+                            {/* Third-Party Services */}
+                            <div>
+                                <p className="font-semibold mb-1">Third-Party Services</p>
+                                <div className={`${themeClasses.textSecondary} space-y-1`}>
+                                    <p><strong>Email composition:</strong> Recipient addresses, subjects, and message content are passed to your email provider (Gmail/Outlook) via URL parameters when you choose to compose.</p>
+                                    <p><strong>CDN scripts:</strong> PDF libraries are loaded from cdnjs.cloudflare.com at runtime. No personal data from your contacts is sent to the CDN.</p>
+                                </div>
+                            </div>
+
+                            {/* Your Rights */}
+                            <div>
+                                <p className="font-semibold mb-1">Your Rights</p>
+                                <p className={`${themeClasses.textSecondary}`}>
+                                    Under FIPPA and applicable privacy laws, you have the right to access, correct, delete, and export your data at any time.
+                                </p>
+                            </div>
+
+                            {/* Children's Privacy */}
+                            <div>
+                                <p className="font-semibold mb-1">Children's Privacy</p>
+                                <p className={`${themeClasses.textSecondary}`}>
+                                    This application may be used to manage contact information for students or minors. Users are responsible for ensuring they have appropriate authorization.
+                                </p>
+                            </div>
+                        </div>
+                        <div className="p-4 border-t flex justify-end bg-gray-50/5">
+                            <button onClick={closeModals} className={`px-5 py-2 rounded-lg text-xs font-bold transition-all active:scale-95 ${themeClasses.btnSecondary}`}>
+                                Close
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* Draft Email Modal */}
             {modals.draftEmail && (
                 <DraftEmailModal
@@ -1873,6 +2095,79 @@ export default function App() {
                     }}
                     themeClasses={themeClasses}
                 />
+            )}
+
+            {/* Auto-Backup Encryption Password Prompt */}
+            {showAutoBackupPasswordPrompt && (
+                <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[100] p-4 backdrop-blur-xs">
+                    <div className={`rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden border animate-in fade-in zoom-in-95 duration-200 ${themeClasses.cardBg}`}>
+                        <div className="p-5 border-b flex items-center gap-3 bg-gray-50/5">
+                            <AlertCircle className="flex-shrink-0 text-yellow-400" size={24} />
+                            <h3 className={`font-extrabold text-lg tracking-tight ${themeClasses.textPrimary}`}>
+                                {autoBackupMode === 'setup' ? 'Encrypt Auto-Backups' : 'Unlock Auto-Backups'}
+                            </h3>
+                        </div>
+                        <div className={`p-5 text-sm leading-relaxed font-medium transition-colors duration-300 ${themeClasses.textSecondary}`}>
+                            {autoBackupMode === 'setup' ? (
+                                <p>Your browser has unencrypted auto-backups. Set a password to encrypt them with AES-256 for FIPPA compliance.</p>
+                            ) : (
+                                <p>Enter your password to decrypt and restore your auto-backups.</p>
+                            )}
+                        </div>
+                        <div className="p-5 space-y-3">
+                            <label className="block text-[11px] font-bold text-gray-600 dark:text-gray-300">
+                                {autoBackupMode === 'setup' ? 'Set Encryption Password' : 'Enter Decryption Password'}
+                            </label>
+                            <input
+                                type="password"
+                                value={autoBackupPassword}
+                                onChange={(e) => setAutoBackupPassword(e.target.value)}
+                                placeholder={autoBackupMode === 'setup' ? 'Choose a strong password' : 'Enter your password'}
+                                className={`w-full text-xs p-2.5 rounded-lg border outline-none transition-all ${themeClasses.inputBg}`}
+                                autoFocus
+                                onKeyDown={(e) => {
+                                    if (e.key === 'Enter') {
+                                        autoBackupMode === 'setup' ? handleSetAutoBackupPassword() : handleDecryptAutoBackup();
+                                    }
+                                }}
+                            />
+                            {autoBackupMode === 'setup' && (
+                                <>
+                                    <label className="block text-[11px] font-bold text-gray-600 dark:text-gray-300">Confirm Password</label>
+                                    <input
+                                        type="password"
+                                        value={autoBackupPasswordConfirm}
+                                        onChange={(e) => setAutoBackupPasswordConfirm(e.target.value)}
+                                        placeholder="Confirm your password"
+                                        className={`w-full text-xs p-2.5 rounded-lg border outline-none transition-all ${themeClasses.inputBg}`}
+                                        onKeyDown={(e) => {
+                                            if (e.key === 'Enter') handleSetAutoBackupPassword();
+                                        }}
+                                    />
+                                </>
+                            )}
+                            <p className="text-[10px] text-gray-500 dark:text-gray-400 font-medium">
+                                Store this password securely — you will need it to access auto-backups in future sessions.
+                            </p>
+                        </div>
+                        <div className="p-4 bg-gray-50/5 border-t flex justify-end gap-2">
+                            <button
+                                type="button"
+                                onClick={handleSkipAutoBackupEncryption}
+                                className={`px-4 py-2 rounded-lg text-xs font-bold transition-all active:scale-95 ${themeClasses.btnSecondary}`}
+                            >
+                                Skip
+                            </button>
+                            <button
+                                type="button"
+                                onClick={autoBackupMode === 'setup' ? handleSetAutoBackupPassword : handleDecryptAutoBackup}
+                                className={`px-4 py-2 rounded-lg text-xs font-bold transition-all active:scale-95 ${themeClasses.btnPrimary}`}
+                            >
+                                {autoBackupMode === 'setup' ? 'Encrypt & Continue' : 'Unlock'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
             )}
 
             {/* --- CUSTOM DIALOG OVERLAY (Replaces window.confirm & window.alert) --- */}
