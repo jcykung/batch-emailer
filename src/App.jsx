@@ -4,7 +4,7 @@ import {
     CheckSquare, Square, X, Archive, FileText, Check, AlertCircle,
     Copy, ExternalLink, RefreshCw, FolderOpen, MoreVertical, Menu,
     ChevronDown, ChevronUp, Clock, History, Trash, Printer, FileSpreadsheet,
-    Sun, Moon, Sparkles, Coffee
+    Sun, Moon, Sparkles, Coffee, AlertTriangle, CheckCircle2, Cloud, CloudOff
 } from 'lucide-react';
 
 // --- Utility Functions ---
@@ -16,147 +16,374 @@ const formatDate = (dateString) => {
     return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 };
 
-// --- Web Crypto Encryption Utilities for FIPPA Compliant Backups ---
-const deriveKey = async (password, salt) => {
-    const enc = new TextEncoder();
-    const keyMaterial = await crypto.subtle.importKey(
-        "raw",
-        enc.encode(password),
-        { name: "PBKDF2" },
-        false,
-        ["deriveKey"]
-    );
-    return crypto.subtle.deriveKey(
-        {
-            name: "PBKDF2",
-            salt: salt,
-            iterations: 100000,
-            hash: "SHA-256"
-        },
-        keyMaterial,
-        { name: "AES-GCM", length: 256 },
-        false,
-        ["encrypt", "decrypt"]
-    );
-};
+// --- Web Crypto Encryption Utilities (App-Key Casual Privacy) ---
+const EXPORT_KEY = "BatchEmailer export key v1 - casual privacy only";
+const EXPORT_MARKER = "batch-emailer-encrypted-v1";
 
-const encryptData = async (dataObject, password) => {
-    const enc = new TextEncoder();
-    const salt = crypto.getRandomValues(new Uint8Array(16));
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-    const key = await deriveKey(password, salt);
-    const encodedData = enc.encode(JSON.stringify(dataObject));
-    const encryptedContent = await crypto.subtle.encrypt(
-        { name: "AES-GCM", iv: iv },
-        key,
-        encodedData
-    );
-
-    // Combine salt + iv + encryptedContent into a single base64 string or envelope object
-    return JSON.stringify({
-        encrypted: true,
-        version: 1,
-        salt: Array.from(salt),
-        iv: Array.from(iv),
-        ciphertext: Array.from(new Uint8Array(encryptedContent))
-    });
-};
-
-const decryptData = async (envelope, password) => {
-    if (!envelope || !envelope.encrypted || !envelope.ciphertext) {
-        throw new Error("Invalid encrypted format");
+function encodeExportBytes(bytes) {
+    let binary = "";
+    const len = bytes.byteLength;
+    const chunkSize = 8192;
+    for (let i = 0; i < len; i += chunkSize) {
+        const chunk = bytes.subarray(i, Math.min(i + chunkSize, len));
+        binary += String.fromCharCode.apply(null, chunk);
     }
-    const salt = new Uint8Array(envelope.salt);
-    const iv = new Uint8Array(envelope.iv);
-    const ciphertext = new Uint8Array(envelope.ciphertext);
-    const key = await deriveKey(password, salt);
-    const decryptedBuffer = await crypto.subtle.decrypt(
-        { name: "AES-GCM", iv: iv },
+    return btoa(binary);
+}
+
+function decodeExportBytes(value) {
+    const cleanB64 = (value || "").replace(/\s+/g, "");
+    const binary = atob(cleanB64);
+    const len = binary.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+}
+
+async function getCryptoKey(usage) {
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(EXPORT_KEY));
+    return crypto.subtle.importKey("raw", digest, "AES-GCM", false, [usage]);
+}
+
+async function encryptExport(data) {
+    const key = await getCryptoKey("encrypt");
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const plaintext = new TextEncoder().encode(JSON.stringify(data));
+    const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plaintext);
+    return JSON.stringify({
+        format: EXPORT_MARKER,
+        iv: encodeExportBytes(iv),
+        data: encodeExportBytes(new Uint8Array(ciphertext))
+    }, null, 2);
+}
+
+async function parseExport(text) {
+    if (typeof text !== "string") return text;
+    text = text.replace(/^\uFEFF/, "").trim();
+    let envelope;
+    try {
+        envelope = JSON.parse(text);
+    } catch {
+        throw new Error("Invalid JSON file");
+    }
+    if (!envelope || envelope.format !== EXPORT_MARKER) {
+        // Legacy plain JSON or raw data
+        return envelope;
+    }
+    const key = await getCryptoKey("decrypt");
+    const plaintext = await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv: decodeExportBytes(envelope.iv) },
         key,
-        ciphertext
+        decodeExportBytes(envelope.data)
     );
-    const dec = new TextDecoder();
-    return JSON.parse(dec.decode(decryptedBuffer));
-};
+    return JSON.parse(new TextDecoder().decode(plaintext));
+}
 
-// --- IndexedDB Auto-Backup Utility ---
-const DB_NAME = 'BatchEmailerDB';
-const DB_VERSION = 1;
-const STORE_NAME = 'auto_backups';
+// --- Canonical Data Representation & Fast Hashing ---
+function getCanonicalData(folders = null, classes = null, students = null) {
+    let rawFolders, rawClasses, rawStudents;
+    if (folders && typeof folders === 'object' && !Array.isArray(folders)) {
+        rawFolders = folders.folders || [];
+        rawClasses = folders.classes || [];
+        rawStudents = folders.students || [];
+    } else {
+        rawFolders = folders || [];
+        rawClasses = classes || [];
+        rawStudents = students || [];
+    }
 
-const initIDB = () => {
+    const cleanFolders = [...rawFolders].sort((a, b) => (a.id || '').localeCompare(b.id || '')).map(f => ({
+        id: f.id,
+        name: f.name || '',
+        isArchived: !!f.isArchived,
+        createdAt: f.createdAt || ''
+    }));
+
+    const cleanClasses = [...rawClasses].sort((a, b) => (a.id || '').localeCompare(b.id || '')).map(c => ({
+        id: c.id,
+        name: c.name || '',
+        folderId: c.folderId || null,
+        isArchived: !!c.isArchived,
+        createdAt: c.createdAt || ''
+    }));
+
+    const cleanStudents = [...rawStudents].sort((a, b) => (a.id || '').localeCompare(b.id || '')).map(s => ({
+        id: s.id,
+        name: s.name || '',
+        classId: s.classId || null,
+        emails: [...(s.emails || [])].sort(),
+        notes: s.notes || '',
+        emailHistory: [...(s.emailHistory || [])].sort((a, b) => (a.id || '').localeCompare(b.id || ''))
+    }));
+
+    return { folders: cleanFolders, classes: cleanClasses, students: cleanStudents };
+}
+
+function computeDataHashSync(canonicalData) {
+    const str = JSON.stringify(canonicalData);
+    let hash = 5381;
+    for (let i = 0; i < str.length; i++) {
+        hash = ((hash << 5) + hash) + str.charCodeAt(i);
+        hash |= 0;
+    }
+    return hash.toString(16);
+}
+
+async function computeDataHash(canonicalData) {
+    const str = JSON.stringify(canonicalData);
+    const buffer = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
+    return Array.from(new Uint8Array(buffer)).map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+function getDeviceId() {
+    let id = localStorage.getItem('batch-emailer-device-id');
+    if (!id) {
+        id = (typeof crypto.randomUUID === 'function')
+            ? crypto.randomUUID()
+            : ('dev-' + Date.now() + '-' + Math.random().toString(36).slice(2, 9));
+        localStorage.setItem('batch-emailer-device-id', id);
+    }
+    return id;
+}
+
+function getDeviceName() {
+    const ua = navigator.userAgent;
+    let os = 'Unknown Device';
+    if (/Macintosh|Mac OS X/i.test(ua)) os = 'Mac';
+    else if (/Windows/i.test(ua)) os = 'Windows';
+    else if (/Android/i.test(ua)) os = 'Android';
+    else if (/iPhone|iPad|iPod/i.test(ua)) os = 'iOS';
+    else if (/Linux/i.test(ua)) os = 'Linux';
+
+    let browser = 'Browser';
+    if (/Edg/i.test(ua)) browser = 'Edge';
+    else if (/Chrome/i.test(ua)) browser = 'Chrome';
+    else if (/Safari/i.test(ua)) browser = 'Safari';
+    else if (/Firefox/i.test(ua)) browser = 'Firefox';
+
+    return `${os} • ${browser}`;
+}
+
+const SYNC_META_KEY = 'batch-emailer-sync-meta';
+
+function getSyncMeta() {
+    try {
+        const raw = localStorage.getItem(SYNC_META_KEY);
+        return raw ? JSON.parse(raw) : {};
+    } catch {
+        return {};
+    }
+}
+
+function setSyncMeta(updates) {
+    try {
+        const current = getSyncMeta();
+        const next = { ...current, ...updates };
+        localStorage.setItem(SYNC_META_KEY, JSON.stringify(next));
+        return next;
+    } catch {
+        return {};
+    }
+}
+
+// --- Fingerprinting & Difference Engine ---
+function generateDataFingerprint(dataObj = null) {
+    const f = dataObj ? (dataObj.folders || []) : [];
+    const c = dataObj ? (dataObj.classes || []) : [];
+    const s = dataObj ? (dataObj.students || []) : [];
+
+    const classSummary = c.map(item => ({
+        id: item.id,
+        name: item.name || "Untitled Group",
+        folderId: item.folderId,
+        contactCount: s.filter(st => st.classId === item.id).length
+    }));
+
+    return {
+        timestamp: dataObj?.exportedAt ? new Date(dataObj.exportedAt).getTime() : (dataObj?.syncMeta?.timestamp || Date.now()),
+        folderCount: f.length,
+        classCount: c.length,
+        studentCount: s.length,
+        classes: classSummary,
+        totalContacts: s.length
+    };
+}
+
+function compareFingerprints(localFP, fileFP) {
+    if (!localFP || !fileFP) return null;
+    const differences = [];
+
+    const localMap = new Map((localFP.classes || []).map(t => [t.id, t]));
+    const fileMap = new Map((fileFP.classes || []).map(t => [t.id, t]));
+
+    // New in file
+    const newInFile = (fileFP.classes || []).filter(t => !localMap.has(t.id));
+    if (newInFile.length > 0) {
+        differences.push({
+            type: "newClasses",
+            description: `New group(s) in file: ${newInFile.map(t => t.name).join(", ")}`,
+            items: newInFile
+        });
+    }
+
+    // Removed from file (only in local)
+    const onlyInLocal = (localFP.classes || []).filter(t => !fileMap.has(t.id));
+    if (onlyInLocal.length > 0) {
+        differences.push({
+            type: "removedClasses",
+            description: `Group(s) only in local data: ${onlyInLocal.map(t => t.name).join(", ")}`,
+            items: onlyInLocal
+        });
+    }
+
+    // Modified groups
+    const modified = [];
+    (localFP.classes || []).forEach(localItem => {
+        const fileItem = fileMap.get(localItem.id);
+        if (fileItem) {
+            const changes = [];
+            if (localItem.name !== fileItem.name) changes.push(`Name changed: "${localItem.name}" vs "${fileItem.name}"`);
+            if (localItem.contactCount !== fileItem.contactCount) changes.push(`Contacts: ${localItem.contactCount} (local) vs ${fileItem.contactCount} (file)`);
+            if (changes.length > 0) {
+                modified.push({ name: localItem.name, changes });
+            }
+        }
+    });
+
+    if (modified.length > 0) {
+        differences.push({
+            type: "modifiedClasses",
+            description: `${modified.length} group(s) modified`,
+            items: modified
+        });
+    }
+
+    if (localFP.folderCount !== fileFP.folderCount) {
+        differences.push({
+            type: "folderCount",
+            description: `Folders count differs: ${localFP.folderCount} local vs ${fileFP.folderCount} in file`,
+            items: []
+        });
+    }
+
+    if (localFP.studentCount !== fileFP.studentCount) {
+        differences.push({
+            type: "contactCount",
+            description: `Contacts count differs: ${localFP.studentCount} local vs ${fileFP.studentCount} in file`,
+            items: []
+        });
+    }
+
+    return { differences, hasDifferences: differences.length > 0 };
+}
+
+// --- IndexedDB Sync Handle & Auto-Backup Storage ---
+const SYNC_DB_NAME = 'BatchEmailerSyncDB';
+const SYNC_DB_STORE = 'sync_handles';
+const SYNC_HANDLE_KEY = 'activeSyncHandle';
+const AUTO_BACKUP_STORE = 'auto_backups';
+
+function openSyncDB() {
     return new Promise((resolve, reject) => {
         if (!window.indexedDB) {
             reject(new Error("IndexedDB not supported"));
             return;
         }
-        const request = window.indexedDB.open(DB_NAME, DB_VERSION);
-        request.onupgradeneeded = (event) => {
-            const db = event.target.result;
-            if (!db.objectStoreNames.contains(STORE_NAME)) {
-                db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+        const req = indexedDB.open(SYNC_DB_NAME, 1);
+        req.onupgradeneeded = () => {
+            const db = req.result;
+            if (!db.objectStoreNames.contains(SYNC_DB_STORE)) {
+                db.createObjectStore(SYNC_DB_STORE);
+            }
+            if (!db.objectStoreNames.contains(AUTO_BACKUP_STORE)) {
+                db.createObjectStore(AUTO_BACKUP_STORE, { keyPath: 'id' });
             }
         };
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
     });
-};
+}
 
-const saveAutoBackupToIDB = async (dataToSave, password) => {
+async function getSyncHandle() {
     try {
-        const db = await initIDB();
-        const tx = db.transaction(STORE_NAME, 'readwrite');
-        const store = tx.objectStore(STORE_NAME);
-        let envelope;
-        if (password) {
-            const encrypted = await encryptData(dataToSave, password);
-            envelope = {
-                id: 'latest_auto_backup',
-                timestamp: new Date().toISOString(),
-                ...JSON.parse(encrypted)
-            };
-        } else {
-            envelope = {
-                id: 'latest_auto_backup',
-                timestamp: new Date().toISOString(),
-                data: dataToSave
-            };
-        }
-        store.put(envelope);
+        const db = await openSyncDB();
+        return await new Promise((resolve, reject) => {
+            const tx = db.transaction(SYNC_DB_STORE, "readonly");
+            const req = tx.objectStore(SYNC_DB_STORE).get(SYNC_HANDLE_KEY);
+            req.onsuccess = () => resolve(req.result || null);
+            req.onerror = () => reject(tx.error);
+        });
+    } catch {
+        return null;
+    }
+}
+
+async function setSyncHandle(handle) {
+    const db = await openSyncDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(SYNC_DB_STORE, "readwrite");
+        tx.objectStore(SYNC_DB_STORE).put(handle, SYNC_HANDLE_KEY);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+    });
+}
+
+async function clearSyncHandle() {
+    const db = await openSyncDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(SYNC_DB_STORE, "readwrite");
+        tx.objectStore(SYNC_DB_STORE).delete(SYNC_HANDLE_KEY);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+    });
+}
+
+const saveAutoBackupToIDB = async (dataToSave) => {
+    try {
+        const db = await openSyncDB();
+        const encrypted = await encryptExport(dataToSave);
+        const tx = db.transaction(AUTO_BACKUP_STORE, 'readwrite');
+        const store = tx.objectStore(AUTO_BACKUP_STORE);
+        store.put({
+            id: 'latest_auto_backup',
+            timestamp: new Date().toISOString(),
+            envelope: JSON.parse(encrypted)
+        });
     } catch (err) {
         console.warn("Failed to write auto-backup to IndexedDB:", err);
     }
 };
 
-const getRawAutoBackupFromIDB = async () => {
-    try {
-        const db = await initIDB();
-        return new Promise((resolve) => {
-            const tx = db.transaction(STORE_NAME, 'readonly');
-            const store = tx.objectStore(STORE_NAME);
-            const request = store.get('latest_auto_backup');
-            request.onsuccess = () => resolve(request.result || null);
-            request.onerror = () => resolve(null);
-        });
-    } catch (err) {
-        return null;
-    }
-};
-
-const getAutoBackupFromIDB = async (password) => {
-    try {
-        const raw = await getRawAutoBackupFromIDB();
-        if (!raw) return null;
-        if (raw.encrypted === true) {
-            if (!password) return null;
-            return await decryptData(raw, password);
+// --- Save File Helper with File System Access API & Fallback ---
+async function saveFileAs(content, defaultFilename, mimeType = "application/json") {
+    if (window.showSaveFilePicker) {
+        try {
+            const ext = defaultFilename.split(".").pop();
+            const handle = await window.showSaveFilePicker({
+                suggestedName: defaultFilename,
+                types: [{ description: "JSON File", accept: { [mimeType]: ["." + ext] } }]
+            });
+            const writable = await handle.createWritable();
+            await writable.write(typeof content === "string" ? content : JSON.stringify(content));
+            await writable.close();
+            return handle;
+        } catch (e) {
+            if (e.name === "AbortError") return null;
         }
-        return raw.data || raw;
-    } catch (err) {
-        console.warn("Failed to read auto-backup from IndexedDB:", err);
-        return null;
     }
-};
+    // Fallback (Firefox, Safari, mobile)
+    const str = typeof content === "string" ? content : JSON.stringify(content);
+    const blob = new Blob([str], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = defaultFilename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return null;
+}
 
 // --- Local CSV Parser Utility ---
 const parseCSV = (text) => {
@@ -311,56 +538,65 @@ export default function App() {
         }
     }, [data, setData]);
 
-    // Automatic Browser Backup to IndexedDB on data changes (Feature #3)
+    // Sync & Backup State (Universal Architecture)
+    const [syncStatus, setSyncStatus] = useState('idle'); // 'idle' | 'syncing' | 'synced' | 'local-changes' | 'error'
+    const [syncFileName, setSyncFileName] = useState('');
+    const [showSyncConflictModal, setShowSyncConflictModal] = useState(false);
+    const [syncConflictData, setSyncConflictData] = useState(null);
+    const [showRestoreChoiceModal, setShowRestoreChoiceModal] = useState(false);
+    const [pendingRestoreData, setPendingRestoreData] = useState(null);
+
+    // Note local change for fast hash diffing
+    const noteLocalChange = (updatedData) => {
+        const meta = getSyncMeta();
+        if (meta.baseFastHash && updatedData) {
+            const currentFastHash = computeDataHashSync(getCanonicalData(updatedData));
+            if (currentFastHash !== meta.baseFastHash) {
+                setSyncStatus('local-changes');
+            } else {
+                setSyncStatus('synced');
+            }
+        }
+    };
+
+    // Automatic Browser Backup to IndexedDB on data changes + change tracking
     useEffect(() => {
-        if (data && (data.folders.length > 0 || data.classes.length > 0 || data.students.length > 0)) {
-            saveAutoBackupToIDB(data, autoBackupPasswordRef.current);
+        if (data) {
+            noteLocalChange(data);
+            if (data.folders.length > 0 || data.classes.length > 0 || data.students.length > 0) {
+                saveAutoBackupToIDB(data);
+            }
         }
     }, [data]);
 
-    // Auto-Backup Encryption: Check IndexedDB on mount to determine encryption status
+    // Initialize Sync Handle and Status on Mount
     useEffect(() => {
-        const checkAutoBackupEncryption = async () => {
+        const initSync = async () => {
             try {
-                const raw = await getRawAutoBackupFromIDB();
-                if (!raw) {
-                    setAutoBackupStatus('ready');
-                    return;
+                const meta = getSyncMeta();
+                if (meta.fileName) {
+                    setSyncFileName(meta.fileName);
                 }
-                if (raw.encrypted === true) {
-                    setAutoBackupMode('unlock');
-                    setShowAutoBackupPasswordPrompt(true);
-                } else {
-                    const hasData = raw.folders?.length > 0 || raw.classes?.length > 0 || raw.students?.length > 0;
-                    if (hasData) {
-                        setAutoBackupMode('setup');
-                        setShowAutoBackupPasswordPrompt(true);
+                const handle = await getSyncHandle();
+                if (handle) {
+                    setSyncFileName(handle.name);
+                }
+                if (meta.baseFastHash && data) {
+                    const currentFastHash = computeDataHashSync(getCanonicalData(data));
+                    if (currentFastHash !== meta.baseFastHash) {
+                        setSyncStatus('local-changes');
                     } else {
-                        setAutoBackupStatus('ready');
+                        setSyncStatus('synced');
                     }
+                } else {
+                    setSyncStatus('idle');
                 }
-            } catch {
-                setAutoBackupStatus('ready');
+            } catch (err) {
+                console.warn("Failed to initialize sync state:", err);
             }
         };
-        checkAutoBackupEncryption();
+        initSync();
     }, []);
-
-    // Password & Encrypted Import State for FIPPA Compliant Backups
-    const [exportPassword, setExportPassword] = useState('');
-    const [exportPasswordConfirm, setExportPasswordConfirm] = useState('');
-    const [importPassword, setImportPassword] = useState('');
-    const [pendingImportFile, setPendingImportFile] = useState(null);
-    const [pendingImportMode, setPendingImportMode] = useState(null); // 'replace' | 'append'
-    const [showImportPasswordPrompt, setShowImportPasswordPrompt] = useState(false);
-
-    // Auto-Backup Encryption State
-    const autoBackupPasswordRef = useRef(null);
-    const [showAutoBackupPasswordPrompt, setShowAutoBackupPasswordPrompt] = useState(false);
-    const [autoBackupPassword, setAutoBackupPassword] = useState('');
-    const [autoBackupPasswordConfirm, setAutoBackupPasswordConfirm] = useState('');
-    const [autoBackupMode, setAutoBackupMode] = useState(null); // 'setup' | 'unlock'
-    const [autoBackupStatus, setAutoBackupStatus] = useState('pending'); // 'pending' | 'ready' | 'skipped'
 
     // Handle auto-collapsing sidebar on mount for smaller mobile screens
     useEffect(() => {
@@ -701,13 +937,10 @@ export default function App() {
     const closeModals = () => {
         setModals({ folder: false, class: false, student: false, bulkAdd: false, draftEmail: false, backup: false, changelog: false, privacy: false });
         setEditingItem(null);
-        setExportPassword('');
-        setExportPasswordConfirm('');
-        setImportPassword('');
-        setPendingImportFile(null);
-        setPendingImportMode(null);
-        setShowImportPasswordPrompt(false);
-        // Note: auto-backup password prompt is not closed here — it's a system-level prompt
+        setShowSyncConflictModal(false);
+        setSyncConflictData(null);
+        setShowRestoreChoiceModal(false);
+        setPendingRestoreData(null);
     };
 
     const openEditModal = (type, item) => {
@@ -961,43 +1194,18 @@ export default function App() {
         }
     };
 
-    // --- Export / Import Logic with AES-256 Encryption ---
-    const handleExportBackup = async () => {
-        if (!exportPassword) {
-            showAlert("Password Required", "Please enter a password to encrypt your backup file for FIPPA compliance.");
-            return;
-        }
-        if (exportPassword !== exportPasswordConfirm) {
-            showAlert("Password Mismatch", "The passwords you entered do not match. Please verify your password.");
-            return;
-        }
-        try {
-            const encryptedJsonStr = await encryptData(data, exportPassword);
-            const blob = new Blob([encryptedJsonStr], { type: 'application/json' });
-            const url = URL.createObjectURL(blob);
-            const downloadAnchorNode = document.createElement('a');
-            downloadAnchorNode.setAttribute("href", url);
-            downloadAnchorNode.setAttribute("download", `batch_emailer_backup_${new Date().toISOString().split('T')[0]}.json`);
-            document.body.appendChild(downloadAnchorNode);
-            downloadAnchorNode.click();
-            downloadAnchorNode.remove();
-            URL.revokeObjectURL(url);
-            setExportPassword('');
-            setExportPasswordConfirm('');
-            showAlert("Backup Created", "Your backup file has been encrypted and downloaded successfully. Please store your password securely, as you will need it to import this backup in the future.");
-        } catch (err) {
-            console.error("Encryption error:", err);
-            showAlert("Export Failed", "Could not encrypt backup file. Please try again.");
-        }
-    };
+    // --- Universal Sync & Backup System Handlers ---
 
-    const processImportData = (importedData, mode) => {
-        if (!importedData.folders || !importedData.classes || !importedData.students) {
-            throw new Error("Invalid file structure");
+    const normalizeImportedData = (importedData) => {
+        if (!importedData || typeof importedData !== 'object') {
+            throw new Error("Invalid file content");
         }
+        const folders = Array.isArray(importedData.folders) ? importedData.folders : [];
+        const classes = Array.isArray(importedData.classes) ? importedData.classes : [];
+        let students = Array.isArray(importedData.students) ? importedData.students : [];
 
         // Schema migration for imported datasets
-        importedData.students = importedData.students.map(student => {
+        students = students.map(student => {
             let updatedStudent = { ...student };
 
             if (!updatedStudent.emails) {
@@ -1022,143 +1230,452 @@ export default function App() {
             return updatedStudent;
         });
 
-        if (mode === 'replace') {
-            showConfirm("Replace Data", "WARNING: This will completely replace all your current data. Are you sure?", () => {
-                setData(importedData);
-                setActiveFolderId(null);
-                setActiveClassId(null);
-                closeModals();
-                showAlert("Success", "Data replaced successfully.");
+        return { folders, classes, students };
+    };
+
+    const buildSyncJSON = async (revision = 1, currentData = null) => {
+        const activeData = currentData || data;
+        const canonicalData = getCanonicalData(activeData);
+        const contentHash = await computeDataHash(canonicalData);
+        const meta = getSyncMeta();
+        const rev = Number.isFinite(revision) ? revision : ((meta.baseRevision || 0) + 1);
+
+        const payload = {
+            version: 2,
+            exportedAt: new Date().toISOString(),
+            syncMeta: {
+                schemaVersion: 2,
+                revision: rev,
+                timestamp: Date.now(),
+                deviceId: getDeviceId(),
+                deviceName: getDeviceName(),
+                contentHash: contentHash,
+                summary: {
+                    folderCount: (activeData.folders || []).length,
+                    classCount: (activeData.classes || []).length,
+                    studentCount: (activeData.students || []).length
+                }
+            },
+            folders: activeData.folders || [],
+            classes: activeData.classes || [],
+            students: activeData.students || []
+        };
+
+        const jsonStr = await encryptExport(payload);
+        return { jsonStr, payload, canonicalData, contentHash, revision: rev };
+    };
+
+    const pushToHandle = async (handle, revision, currentData = null) => {
+        const activeData = currentData || data;
+        if (handle.queryPermission) {
+            let perm = await handle.queryPermission({ mode: 'readwrite' });
+            if (perm !== 'granted') {
+                perm = await handle.requestPermission({ mode: 'readwrite' });
+                if (perm !== 'granted') throw new Error("Permission to write file denied");
+            }
+        }
+        const { jsonStr, canonicalData, contentHash } = await buildSyncJSON(revision, activeData);
+        const writable = await handle.createWritable();
+        await writable.write(jsonStr);
+        await writable.close();
+
+        const fastHash = computeDataHashSync(canonicalData);
+        setSyncMeta({
+            fileName: handle.name,
+            baseRevision: revision,
+            lastSyncedRevision: revision,
+            baseContentHash: contentHash,
+            lastSyncedContentHash: contentHash,
+            baseFastHash: fastHash,
+            lastSyncedAt: Date.now()
+        });
+        setSyncFileName(handle.name);
+        setSyncStatus('synced');
+        return true;
+    };
+
+    const executeSyncResolution = async ({ parsed, file, handle = null, currentData = null, onPushRequired = null }) => {
+        const activeData = currentData || data;
+        const meta = getSyncMeta();
+        const localCanonical = getCanonicalData(activeData);
+        const localHash = await computeDataHash(localCanonical);
+
+        const fileNormalized = normalizeImportedData(parsed);
+        const fileCanonical = getCanonicalData(fileNormalized);
+        const fileHash = await computeDataHash(fileCanonical);
+        const fileMeta = parsed?.syncMeta || null;
+        const fileRevision = Number.isFinite(fileMeta?.revision) ? fileMeta.revision : 1;
+        const fileName = file?.name || meta.fileName || "batch_emailer_sync.json";
+
+        // Case 0: Hashes identical
+        if (fileHash && localHash === fileHash) {
+            setSyncMeta({
+                fileName,
+                lastSyncedRevision: fileRevision,
+                lastSyncedContentHash: localHash,
+                baseRevision: fileRevision,
+                baseContentHash: localHash,
+                baseFastHash: computeDataHashSync(localCanonical),
+                lastSyncedAt: Date.now()
             });
-        } else if (mode === 'append') {
-            const newFolders = [];
-            const newClasses = [];
-            const newStudents = [];
+            setSyncFileName(fileName);
+            setSyncStatus('synced');
+            showAlert("In Sync", "Local data and sync file are already identical.");
+            return;
+        }
 
-            importedData.folders.forEach(f => {
-                const newFId = generateId();
-                newFolders.push({ ...f, id: newFId });
+        // Case 1: Initial setup where one side is empty
+        const localEmpty = activeData.folders.length === 0 && activeData.classes.length === 0 && activeData.students.length === 0;
+        const fileEmpty = fileNormalized.folders.length === 0 && fileNormalized.classes.length === 0 && fileNormalized.students.length === 0;
 
-                importedData.classes.filter(c => c.folderId === f.id).forEach(c => {
-                    const newCId = generateId();
-                    newClasses.push({ ...c, id: newCId, folderId: newFId });
-
-                    importedData.students.filter(s => s.classId === c.id).forEach(s => {
-                        newStudents.push({ ...s, id: generateId(), classId: newCId });
-                    });
-                });
+        if (localEmpty && !fileEmpty) {
+            setData(fileNormalized);
+            setActiveFolderId(null);
+            setActiveClassId(null);
+            setSyncMeta({
+                fileName,
+                baseRevision: fileRevision,
+                lastSyncedRevision: fileRevision,
+                baseContentHash: fileHash,
+                lastSyncedContentHash: fileHash,
+                baseFastHash: computeDataHashSync(fileCanonical),
+                lastSyncedAt: Date.now()
             });
+            setSyncFileName(fileName);
+            setSyncStatus('synced');
+            showAlert("Sync Complete", `Loaded data from ${fileName}.`);
+            return;
+        }
 
-            setData(prev => ({
-                folders: [...prev.folders, ...newFolders],
-                classes: [...prev.classes, ...newClasses],
-                students: [...prev.students, ...newStudents]
-            }));
-            closeModals();
-            showAlert("Success", "Data appended successfully.");
+        if (!localEmpty && fileEmpty) {
+            if (handle) {
+                await pushToHandle(handle, 1, activeData);
+            } else if (onPushRequired) {
+                await onPushRequired(1);
+            }
+            setSyncFileName(fileName);
+            setSyncStatus('synced');
+            showAlert("Sync Complete", `Initial sync saved to ${fileName}.`);
+            return;
+        }
+
+        // Case 2: 3-Way check against base
+        const baseHash = meta.baseContentHash || null;
+        const localChanged = baseHash ? (localHash !== baseHash) : true;
+        const fileChanged = baseHash ? (fileHash !== baseHash) : true;
+
+        if (!localChanged && fileChanged) {
+            // Silent Pull
+            setData(fileNormalized);
+            setActiveFolderId(null);
+            setActiveClassId(null);
+            setSyncMeta({
+                fileName,
+                baseRevision: fileRevision,
+                lastSyncedRevision: fileRevision,
+                baseContentHash: fileHash,
+                lastSyncedContentHash: fileHash,
+                baseFastHash: computeDataHashSync(fileCanonical),
+                lastSyncedAt: Date.now()
+            });
+            setSyncFileName(fileName);
+            setSyncStatus('synced');
+            showAlert("Sync Complete", `Updated local data from ${fileName}.`);
+        } else if (localChanged && !fileChanged) {
+            // Silent Push
+            const nextRev = (meta.baseRevision || 0) + 1;
+            if (handle) {
+                await pushToHandle(handle, nextRev, activeData);
+            } else if (onPushRequired) {
+                await onPushRequired(nextRev);
+            }
+            setSyncFileName(fileName);
+            setSyncStatus('synced');
+            showAlert("Sync Complete", `Saved your latest changes to ${fileName}.`);
+        } else {
+            // True Conflict (or first sync with data on both sides)
+            const localFP = generateDataFingerprint(activeData);
+            const fileFP = generateDataFingerprint(fileNormalized);
+            const comparison = compareFingerprints(localFP, fileFP);
+
+            setSyncConflictData({
+                comparison,
+                parsed: fileNormalized,
+                fileRevision,
+                fileHash,
+                fileCanonical,
+                handle,
+                onPushRequired,
+                fileName
+            });
+            setShowSyncConflictModal(true);
         }
     };
 
-    const handleFileSelect = (e, mode) => {
-        const file = e.target.files[0];
+    const handleSync = async () => {
+        setSyncStatus('syncing');
+        try {
+            if (window.showOpenFilePicker) {
+                // File System Access API supported (Chrome, Edge, Arc)
+                let handle = await getSyncHandle();
+                let needPick = !handle;
+
+                if (handle) {
+                    try {
+                        if (handle.queryPermission) {
+                            let perm = await handle.queryPermission({ mode: 'readwrite' });
+                            if (perm !== 'granted') {
+                                perm = await handle.requestPermission({ mode: 'readwrite' });
+                            }
+                            if (perm !== 'granted') needPick = true;
+                        }
+                    } catch {
+                        needPick = true;
+                    }
+                }
+
+                if (needPick) {
+                    const pickerHandles = await window.showOpenFilePicker({
+                        multiple: false,
+                        types: [{ description: "JSON Sync File", accept: { "application/json": [".json"] } }]
+                    });
+                    handle = pickerHandles[0];
+                    if (!handle) {
+                        setSyncStatus('idle');
+                        return;
+                    }
+                    await setSyncHandle(handle);
+                }
+
+                const file = await handle.getFile();
+                const text = await file.text();
+                const parsed = await parseExport(text);
+                await executeSyncResolution({ parsed, file, handle, currentData: data });
+            } else {
+                // Non-FSA fallback (Safari, Firefox, Mobile)
+                const input = document.createElement('input');
+                input.type = 'file';
+                input.accept = '.json';
+                input.onchange = async (e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) {
+                        setSyncStatus('idle');
+                        return;
+                    }
+                    try {
+                        const text = await file.text();
+                        const parsed = await parseExport(text);
+                        await executeSyncResolution({
+                            parsed,
+                            file,
+                            handle: null,
+                            currentData: data,
+                            onPushRequired: async (nextRev) => {
+                                const { jsonStr } = await buildSyncJSON(nextRev, data);
+                                await saveFileAs(jsonStr, file.name || "batch_emailer_sync.json");
+                            }
+                        });
+                    } catch (err) {
+                        console.error("Sync error:", err);
+                        setSyncStatus('error');
+                        showAlert("Sync Error", "Failed to parse sync file: " + (err.message || err));
+                    }
+                };
+                input.click();
+            }
+        } catch (err) {
+            if (err.name !== 'AbortError') {
+                console.error("Sync failed:", err);
+                setSyncStatus('error');
+                showAlert("Sync Failed", "Could not complete sync: " + (err.message || err));
+            } else {
+                setSyncStatus('idle');
+            }
+        }
+    };
+
+    const handleDisconnectSync = async () => {
+        showConfirm("Disconnect Sync", "Disconnecting will stop syncing with this file. Your local data will remain unchanged.", async () => {
+            await clearSyncHandle();
+            setSyncMeta({
+                fileName: null,
+                baseRevision: null,
+                baseContentHash: null,
+                baseFastHash: null,
+                lastSyncedAt: null,
+                lastSyncedRevision: null,
+                lastSyncedContentHash: null
+            });
+            setSyncFileName('');
+            setSyncStatus('idle');
+            showAlert("Disconnected", "Sync file disconnected successfully.");
+        });
+    };
+
+    const handleResolveConflictKeepFile = () => {
+        if (!syncConflictData) return;
+        setData(syncConflictData.parsed);
+        setActiveFolderId(null);
+        setActiveClassId(null);
+        setSyncMeta({
+            fileName: syncConflictData.fileName,
+            baseRevision: syncConflictData.fileRevision,
+            lastSyncedRevision: syncConflictData.fileRevision,
+            baseContentHash: syncConflictData.fileHash,
+            lastSyncedContentHash: syncConflictData.fileHash,
+            baseFastHash: computeDataHashSync(syncConflictData.fileCanonical),
+            lastSyncedAt: Date.now()
+        });
+        setSyncFileName(syncConflictData.fileName);
+        setSyncStatus('synced');
+        setShowSyncConflictModal(false);
+        setSyncConflictData(null);
+        showAlert("Sync Resolved", "File data applied successfully.");
+    };
+
+    const handleResolveConflictKeepLocal = async () => {
+        if (!syncConflictData) return;
+        try {
+            const nextRev = Math.max(syncConflictData.fileRevision || 0, getSyncMeta().baseRevision || 0) + 1;
+            if (syncConflictData.handle) {
+                await pushToHandle(syncConflictData.handle, nextRev, data);
+            } else if (syncConflictData.onPushRequired) {
+                await syncConflictData.onPushRequired(nextRev);
+            }
+            setSyncFileName(syncConflictData.fileName);
+            setSyncStatus('synced');
+            setShowSyncConflictModal(false);
+            setSyncConflictData(null);
+            showAlert("Sync Resolved", "Overwrote sync file with your local data.");
+        } catch (err) {
+            showAlert("Resolution Failed", "Could not write to file: " + (err.message || err));
+        }
+    };
+
+    const handleExportBackup = async () => {
+        try {
+            const meta = getSyncMeta();
+            const revision = Number.isFinite(meta.baseRevision) ? meta.baseRevision : 1;
+            const { jsonStr } = await buildSyncJSON(revision, data);
+            const dateStr = new Date().toISOString().split('T')[0];
+            const filename = `batch_emailer_backup_${dateStr}.json`;
+
+            // Mobile Native Web Share API
+            if (navigator.share && /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent)) {
+                try {
+                    const blob = new Blob([jsonStr], { type: "application/json" });
+                    const file = new File([blob], filename, { type: "application/json" });
+                    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+                        await navigator.share({ files: [file] });
+                        return;
+                    }
+                } catch {
+                    // fall through to saveFileAs
+                }
+            }
+
+            await saveFileAs(jsonStr, filename, "application/json");
+        } catch (err) {
+            console.error("Backup export error:", err);
+            showAlert("Export Failed", "Could not create backup file: " + (err.message || err));
+        }
+    };
+
+    const restoreFromBackup = async (e) => {
+        const file = e.target.files?.[0];
+        e.target.value = '';
         if (!file) return;
 
-        const fileReader = new FileReader();
-        fileReader.readAsText(file, "UTF-8");
-        fileReader.onload = async (evt) => {
-            try {
-                const parsed = JSON.parse(evt.target.result);
-                if (parsed && parsed.encrypted) {
-                    // File is encrypted, prompt user for password
-                    setPendingImportFile(parsed);
-                    setPendingImportMode(mode);
-                    setShowImportPasswordPrompt(true);
-                    setImportPassword('');
-                } else {
-                    // Unencrypted / Legacy JSON file support
-                    processImportData(parsed, mode);
-                }
-            } catch (err) {
-                showAlert("Error", "Error importing file. Please ensure it is a valid backup file.");
-            }
-        };
-    };
-
-    const handleDecryptAndImport = async () => {
-        if (!importPassword) {
-            showAlert("Password Required", "Please enter the decryption password for this backup file.");
-            return;
-        }
         try {
-            const decryptedData = await decryptData(pendingImportFile, importPassword);
-            processImportData(decryptedData, pendingImportMode);
-            setShowImportPasswordPrompt(false);
-            setImportPassword('');
-            setPendingImportFile(null);
-            setPendingImportMode(null);
+            const text = await file.text();
+            const parsed = await parseExport(text);
+
+            if (!parsed || typeof parsed !== 'object') {
+                showAlert("Error", "Invalid backup file: Not valid JSON or file is empty.");
+                return;
+            }
+
+            const hasData = Array.isArray(parsed.folders) || Array.isArray(parsed.classes) || Array.isArray(parsed.students);
+            if (!hasData) {
+                showAlert("Error", "Invalid backup file format: Expected Batch Emailer data structure.");
+                return;
+            }
+
+            const normalized = normalizeImportedData(parsed);
+            setPendingRestoreData({
+                normalized,
+                raw: parsed,
+                fileName: file.name
+            });
+            setShowRestoreChoiceModal(true);
         } catch (err) {
-            showAlert("Decryption Failed", "Incorrect password or corrupted backup file. Please verify the password and try again.");
+            console.error("Restore error:", err);
+            showAlert("Error", "Failed to read backup file: " + (err.message || err));
         }
     };
 
-    // Auto-Backup Encryption Handlers
-    const handleSetAutoBackupPassword = async () => {
-        if (!autoBackupPassword) {
-            showAlert("Password Required", "Please enter a password to encrypt your auto-backups.");
-            return;
-        }
-        if (autoBackupPassword !== autoBackupPasswordConfirm) {
-            showAlert("Password Mismatch", "The passwords you entered do not match.");
-            return;
-        }
-        autoBackupPasswordRef.current = autoBackupPassword;
-        setAutoBackupStatus('ready');
-        setShowAutoBackupPasswordPrompt(false);
-        setAutoBackupPassword('');
-        setAutoBackupPasswordConfirm('');
-        // Re-encrypt existing backup with the new password
-        if (data && (data.folders.length > 0 || data.classes.length > 0 || data.students.length > 0)) {
-            await saveAutoBackupToIDB(data, autoBackupPassword);
-        }
-        showAlert("Auto-Backups Encrypted", "Your auto-backups are now encrypted with AES-256. You will need this password on future visits.");
+    const handleRestoreReplaceAll = async () => {
+        if (!pendingRestoreData) return;
+        const { normalized, raw, fileName } = pendingRestoreData;
+        const canonical = getCanonicalData(normalized);
+        const hash = await computeDataHash(canonical);
+        const fastHash = computeDataHashSync(canonical);
+        const fileRev = Number.isFinite(raw.syncMeta?.revision) ? raw.syncMeta.revision : 1;
+
+        setData(normalized);
+        setActiveFolderId(null);
+        setActiveClassId(null);
+
+        setSyncMeta({
+            fileName: fileName || getSyncMeta().fileName,
+            baseRevision: fileRev,
+            lastSyncedRevision: fileRev,
+            baseContentHash: hash,
+            lastSyncedContentHash: hash,
+            baseFastHash: fastHash,
+            lastSyncedAt: Date.now()
+        });
+
+        setShowRestoreChoiceModal(false);
+        setPendingRestoreData(null);
+        closeModals();
+        setSyncStatus('synced');
+        showAlert("Restore Complete", "All data has been successfully replaced from the backup.");
     };
 
-    const handleDecryptAutoBackup = async () => {
-        if (!autoBackupPassword) {
-            showAlert("Password Required", "Please enter your auto-backup encryption password.");
+    const handleRestoreImportNew = () => {
+        if (!pendingRestoreData) return;
+        const { normalized } = pendingRestoreData;
+
+        const existingFolderIds = new Set(data.folders.map(f => f.id));
+        const existingClassIds = new Set(data.classes.map(c => c.id));
+        const existingStudentIds = new Set(data.students.map(s => s.id));
+
+        const newFolders = normalized.folders.filter(f => !existingFolderIds.has(f.id));
+        const newClasses = normalized.classes.filter(c => !existingClassIds.has(c.id));
+        const newStudents = normalized.students.filter(s => !existingStudentIds.has(s.id));
+
+        if (newFolders.length === 0 && newClasses.length === 0 && newStudents.length === 0) {
+            setShowRestoreChoiceModal(false);
+            setPendingRestoreData(null);
+            closeModals();
+            showAlert("Import Complete", "No new items found. All items in the backup already exist in your local data.");
             return;
         }
-        try {
-            const raw = await getRawAutoBackupFromIDB();
-            if (raw && raw.encrypted) {
-                const decrypted = await decryptData(raw, autoBackupPassword);
-                // Verify decryption produced valid data
-                if (decrypted && (decrypted.folders || decrypted.classes || decrypted.students)) {
-                    autoBackupPasswordRef.current = autoBackupPassword;
-                    setAutoBackupStatus('ready');
-                    setShowAutoBackupPasswordPrompt(false);
-                    setAutoBackupPassword('');
-                } else {
-                    showAlert("Decryption Failed", "Incorrect password or corrupted backup. Please try again.");
-                }
-            } else {
-                // No encrypted backup, just set the password
-                autoBackupPasswordRef.current = autoBackupPassword;
-                setAutoBackupStatus('ready');
-                setShowAutoBackupPasswordPrompt(false);
-                setAutoBackupPassword('');
-            }
-        } catch {
-            showAlert("Decryption Failed", "Incorrect password or corrupted backup. Please try again.");
-        }
-    };
 
-    const handleSkipAutoBackupEncryption = () => {
-        autoBackupPasswordRef.current = null;
-        setAutoBackupStatus('skipped');
-        setShowAutoBackupPasswordPrompt(false);
-        setAutoBackupPassword('');
-        setAutoBackupPasswordConfirm('');
+        const merged = {
+            folders: [...data.folders, ...newFolders],
+            classes: [...data.classes, ...newClasses],
+            students: [...data.students, ...newStudents]
+        };
+
+        setData(merged);
+        noteLocalChange(merged);
+
+        setShowRestoreChoiceModal(false);
+        setPendingRestoreData(null);
+        closeModals();
+        showAlert("Import Complete", `Successfully imported ${newFolders.length} new folders, ${newClasses.length} new groups, and ${newStudents.length} new contacts.`);
     };
 
     // Theme Constants (Monokai Pro inspired)
@@ -1224,10 +1741,20 @@ export default function App() {
                     </button>
                     <button
                         onClick={() => setModals({ ...modals, backup: true })}
-                        className={`flex items-center justify-center gap-2 w-full py-2 rounded-lg font-semibold transition-all active:scale-[0.98] ${isDark ? 'bg-[#403e41] text-[#fcfaf2] hover:bg-[#4a474a] border border-[#595559]' : 'bg-[#ffffff] text-[#2d2a2e] hover:bg-[#faf8f2] border border-[#dfd9cd]'
+                        className={`flex items-center justify-center gap-2 w-full py-2 px-3 rounded-lg font-semibold transition-all active:scale-[0.98] ${isDark ? 'bg-[#403e41] text-[#fcfaf2] hover:bg-[#4a474a] border border-[#595559]' : 'bg-[#ffffff] text-[#2d2a2e] hover:bg-[#faf8f2] border border-[#dfd9cd]'
                             }`}
                     >
-                        <RefreshCw size={18} /> Backup / Restore
+                        <RefreshCw size={18} className={syncStatus === 'syncing' ? 'animate-spin text-[#78dce8]' : ''} />
+                        <span>Sync & Backup</span>
+                        {syncStatus === 'synced' && (
+                            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 ml-auto flex-shrink-0" title="In Sync"></span>
+                        )}
+                        {syncStatus === 'local-changes' && (
+                            <span className="w-2.5 h-2.5 rounded-full bg-amber-500 ml-auto flex-shrink-0" title="Unsynced local changes"></span>
+                        )}
+                        {syncStatus === 'error' && (
+                            <span className="w-2.5 h-2.5 rounded-full bg-rose-500 ml-auto flex-shrink-0" title="Sync error"></span>
+                        )}
                     </button>
                 </div>
 
@@ -1240,11 +1767,15 @@ export default function App() {
                 </button>
 
                 {/* Sidebar Backup Reminder Alert */}
-                <div className={`px-4 py-3 mx-4 mt-2 mb-1 rounded-xl border flex gap-2.5 items-start text-xs leading-relaxed ${isDark ? 'bg-[#fc9867]/10 border-[#fc9867]/30 text-[#fc9867]' : 'bg-[#f6c445]/10 border-[#f6c445]/30 text-[#8a5d1b]'
+                <div className={`px-4 py-3 mx-4 mt-2 mb-1 rounded-xl border flex gap-2.5 items-start text-xs leading-relaxed ${isDark ? 'bg-[#78dce8]/10 border-[#78dce8]/30 text-[#78dce8]' : 'bg-[#2188a0]/10 border-[#2188a0]/30 text-[#13677a]'
                     }`}>
-                    <AlertCircle size={16} className="flex-shrink-0 mt-0.5" />
+                    <RefreshCw size={15} className="flex-shrink-0 mt-0.5" />
                     <div>
-                        <strong>Important Tip:</strong> Data is saved strictly on this browser. Backup occasionally to protect your records!
+                        {syncFileName ? (
+                            <span>Connected to <strong>{syncFileName}</strong>.</span>
+                        ) : (
+                            <span>Connect a <strong>Sync File</strong> for 1-click cloudless sync, or export backups.</span>
+                        )}
                     </div>
                 </div>
 
@@ -1792,114 +2323,113 @@ export default function App() {
                 />
             )}
 
-            {/* Backup / Restore Modal - Coral Orange Header Accent */}
+            {/* Sync & Backup Modal */}
             {modals.backup && (
                 <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 backdrop-blur-xs">
                     <div className={`rounded-2xl shadow-xl w-full max-w-md overflow-hidden border animate-in fade-in zoom-in-95 duration-200 ${themeClasses.cardBg}`}>
                         <div className="p-4 border-b flex justify-between items-center bg-gray-50/5">
-                            <h3 className={`font-bold text-lg ${isDark ? 'text-[#fc9867]' : 'text-[#c2410c]'}`}>Backup & Restore Data</h3>
+                            <h3 className={`font-bold text-lg ${isDark ? 'text-[#78dce8]' : 'text-[#13677a]'}`}>Sync & Backup</h3>
                             <button onClick={closeModals} className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-500/10 transition-colors"><X size={20} /></button>
                         </div>
-                        <div className="p-6 space-y-6">
+                        <div className="p-5 space-y-4 max-h-[80vh] overflow-y-auto">
 
-                            {/* Export Section */}
+                            {/* Sync Section */}
                             <div className={`border rounded-xl p-4 text-left space-y-3 shadow-xs bg-gray-50/5 ${themeClasses.border}`}>
-                                <div className="flex items-center space-x-2">
-                                    <Download size={24} className="text-blue-500" />
-                                    <h4 className="font-semibold text-sm">Export Encrypted Backup</h4>
+                                <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-2">
+                                        <RefreshCw size={20} className={`${isDark ? 'text-[#78dce8]' : 'text-[#2188a0]'} ${syncStatus === 'syncing' ? 'animate-spin' : ''}`} />
+                                        <h4 className="font-semibold text-sm">File Sync</h4>
+                                    </div>
+                                    {syncStatus === 'synced' && (
+                                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 bg-emerald-500/15 text-emerald-500`}>
+                                            <CheckCircle2 size={11} /> In Sync
+                                        </span>
+                                    )}
+                                    {syncStatus === 'local-changes' && (
+                                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 bg-amber-500/15 text-amber-500`}>
+                                            <AlertTriangle size={11} /> Local Changes
+                                        </span>
+                                    )}
+                                    {syncStatus === 'error' && (
+                                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 bg-rose-500/15 text-rose-500`}>
+                                            <AlertTriangle size={11} /> Error
+                                        </span>
+                                    )}
+                                    {syncStatus === 'idle' && (
+                                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${isDark ? 'bg-gray-600/30 text-gray-400' : 'bg-gray-200 text-gray-500'}`}>
+                                            Not Connected
+                                        </span>
+                                    )}
                                 </div>
-                                <p className="text-xs text-gray-600 dark:text-gray-400 font-medium">
-                                    Encrypts your data with AES-256 before saving to disk to meet FIPPA privacy standards.
+                                <p className="text-xs text-gray-500 dark:text-gray-400 font-medium">
+                                    {window.showOpenFilePicker
+                                        ? 'Chrome/Arc/Edge: Connects to a file on disk. Sync reads and writes automatically on each click.'
+                                        : 'Safari/Firefox: Select a sync file each time you sync. Changes are saved as a new download.'
+                                    }
                                 </p>
-
-                                <div className="p-2.5 bg-amber-500/10 border border-amber-500/30 rounded-lg flex items-start space-x-2 text-xs text-amber-700 dark:text-amber-300">
-                                    <AlertCircle size={16} className="shrink-0 mt-0.5" />
-                                    <span><strong>Important:</strong> Keep track of this password! You will need it to restore or import this backup later.</span>
-                                </div>
-
-                                <div className="space-y-2 pt-1">
-                                    <div>
-                                        <label className="block text-[11px] font-bold text-gray-600 dark:text-gray-300 mb-1">Set Backup Password</label>
-                                        <input
-                                            type="password"
-                                            value={exportPassword}
-                                            onChange={(e) => setExportPassword(e.target.value)}
-                                            placeholder="Enter a strong password"
-                                            className={`w-full text-xs p-2.5 rounded-lg border outline-none transition-all ${themeClasses.inputBg}`}
-                                        />
+                                {syncFileName && (
+                                    <div className={`px-3 py-2 rounded-lg text-[11px] font-mono flex items-center gap-2 ${isDark ? 'bg-[#221f22] text-[#78dce8]' : 'bg-[#e8f4f7] text-[#13677a]'}`}>
+                                        <FileText size={12} className="flex-shrink-0" />
+                                        <span className="truncate">{syncFileName}</span>
                                     </div>
-                                    <div>
-                                        <label className="block text-[11px] font-bold text-gray-600 dark:text-gray-300 mb-1">Confirm Password</label>
-                                        <input
-                                            type="password"
-                                            value={exportPasswordConfirm}
-                                            onChange={(e) => setExportPasswordConfirm(e.target.value)}
-                                            placeholder="Confirm password"
-                                            className={`w-full text-xs p-2.5 rounded-lg border outline-none transition-all ${themeClasses.inputBg}`}
-                                        />
-                                    </div>
+                                )}
+                                <div className="flex gap-2">
+                                    <button
+                                        onClick={() => { handleSync(); setModals({ ...modals, backup: false }); }}
+                                        disabled={syncStatus === 'syncing'}
+                                        className={`flex-1 py-2.5 rounded-lg text-xs font-bold transition-all active:scale-95 flex items-center justify-center gap-1.5 ${syncStatus === 'syncing' ? 'opacity-50 cursor-not-allowed' : ''} ${themeClasses.btnPrimary}`}
+                                    >
+                                        <RefreshCw size={13} className={syncStatus === 'syncing' ? 'animate-spin' : ''} />
+                                        {syncStatus === 'syncing' ? 'Syncing…' : 'Sync Now'}
+                                    </button>
+                                    {syncFileName && (
+                                        <button
+                                            onClick={handleDisconnectSync}
+                                            className={`py-2.5 px-3 rounded-lg text-xs font-bold transition-all active:scale-95 flex items-center gap-1 ${isDark ? 'bg-rose-500/10 text-rose-400 hover:bg-rose-500/20' : 'bg-rose-50 text-rose-600 hover:bg-rose-100'}`}
+                                        >
+                                            <CloudOff size={13} /> Disconnect
+                                        </button>
+                                    )}
                                 </div>
+                                {getSyncMeta().lastSyncedAt && (
+                                    <p className="text-[10px] text-gray-500 dark:text-gray-500">
+                                        Last synced: {new Date(getSyncMeta().lastSyncedAt).toLocaleString()}
+                                    </p>
+                                )}
+                            </div>
 
+                            {/* Export Backup Section */}
+                            <div className={`border rounded-xl p-4 text-left space-y-3 shadow-xs bg-gray-50/5 ${themeClasses.border}`}>
+                                <div className="flex items-center gap-2">
+                                    <Download size={20} className="text-blue-500" />
+                                    <h4 className="font-semibold text-sm">Download Backup</h4>
+                                </div>
+                                <p className="text-xs text-gray-500 dark:text-gray-400 font-medium">
+                                    Saves an encrypted backup file to your device. Can be used as a sync file — interchangeable formats.
+                                </p>
                                 <button onClick={handleExportBackup} className={`w-full py-2.5 rounded-lg text-xs font-bold transition-all active:scale-95 ${themeClasses.btnPrimary}`}>
-                                    Download Encrypted Backup
+                                    <span className="flex items-center justify-center gap-2"><Download size={14} /> Download Encrypted Backup</span>
                                 </button>
                             </div>
 
-                            {/* Import Section */}
+                            {/* Restore Section */}
                             <div className={`border rounded-xl p-4 text-left space-y-3 shadow-xs bg-gray-50/5 ${themeClasses.border}`}>
-                                <div className="flex items-center space-x-2">
-                                    <Upload size={24} className="text-green-500" />
-                                    <h4 className="font-semibold text-sm">Restore Data</h4>
+                                <div className="flex items-center gap-2">
+                                    <Upload size={20} className="text-emerald-500" />
+                                    <h4 className="font-semibold text-sm">Restore from Backup</h4>
                                 </div>
-                                <p className="text-xs text-gray-600 dark:text-gray-400 font-medium">Upload an encrypted or legacy backup file.</p>
-
-                                {!showImportPasswordPrompt ? (
-                                    <div className="grid grid-cols-2 gap-2 mt-2">
-                                        <button onClick={() => {
-                                            const input = document.createElement('input');
-                                            input.type = 'file';
-                                            input.accept = '.json';
-                                            input.onchange = (evt) => handleFileSelect(evt, 'replace');
-                                            input.click();
-                                        }} className={`py-2 px-2 rounded-lg text-xs font-bold transition-all active:scale-95 ${themeClasses.btnSecondary}`}>
-                                            Replace All Data
-                                        </button>
-                                        <button onClick={() => {
-                                            const input = document.createElement('input');
-                                            input.type = 'file';
-                                            input.accept = '.json';
-                                            input.onchange = (evt) => handleFileSelect(evt, 'append');
-                                            input.click();
-                                        }} className={`py-2 px-2 rounded-lg text-xs font-bold transition-all active:scale-95 ${themeClasses.btnSecondary}`}>
-                                            Append Data
-                                        </button>
-                                    </div>
-                                ) : (
-                                    <div className="space-y-3 pt-2 border-t border-gray-500/20">
-                                        <label className="block text-[11px] font-bold text-gray-600 dark:text-gray-300">Enter Backup Decryption Password</label>
-                                        <input
-                                            type="password"
-                                            value={importPassword}
-                                            onChange={(e) => setImportPassword(e.target.value)}
-                                            placeholder="Enter password used when exporting"
-                                            className={`w-full text-xs p-2.5 rounded-lg border outline-none transition-all ${themeClasses.inputBg}`}
-                                            autoFocus
-                                        />
-                                        <div className="flex space-x-2">
-                                            <button onClick={handleDecryptAndImport} className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all active:scale-95 ${themeClasses.btnPrimary}`}>
-                                                Decrypt & Import
-                                            </button>
-                                            <button onClick={() => {
-                                                setShowImportPasswordPrompt(false);
-                                                setImportPassword('');
-                                                setPendingImportFile(null);
-                                                setPendingImportMode(null);
-                                            }} className={`py-2 px-3 rounded-lg text-xs font-bold transition-all ${themeClasses.btnSecondary}`}>
-                                                Cancel
-                                            </button>
-                                        </div>
-                                    </div>
-                                )}
+                                <p className="text-xs text-gray-500 dark:text-gray-400 font-medium">
+                                    Load a backup or sync file. You'll choose whether to replace all data or import only new items.
+                                </p>
+                                <label className={`w-full py-2.5 rounded-lg text-xs font-bold transition-all active:scale-95 cursor-pointer flex items-center justify-center gap-2 ${themeClasses.btnSecondary}`}>
+                                    <Upload size={14} /> Select Backup File
+                                    <input
+                                        type="file"
+                                        accept=".json"
+                                        className="hidden"
+                                        onChange={restoreFromBackup}
+                                    />
+                                </label>
                             </div>
 
                         </div>
@@ -2097,78 +2627,110 @@ export default function App() {
                 />
             )}
 
-            {/* Auto-Backup Encryption Password Prompt */}
-            {showAutoBackupPasswordPrompt && (
+            {/* Sync Conflict Resolution Modal */}
+            {showSyncConflictModal && syncConflictData && (
+                <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[100] p-4 backdrop-blur-xs">
+                    <div className={`rounded-2xl shadow-2xl w-full max-w-md overflow-hidden border animate-in fade-in zoom-in-95 duration-200 ${themeClasses.cardBg}`}>
+                        <div className="p-5 border-b flex items-center gap-3 bg-gray-50/5">
+                            <AlertTriangle className="flex-shrink-0 text-amber-400" size={22} />
+                            <div>
+                                <h3 className={`font-extrabold text-base tracking-tight ${themeClasses.textPrimary}`}>Sync Conflict</h3>
+                                <p className={`text-xs ${themeClasses.textMuted}`}>Both local data and the sync file have changes.</p>
+                            </div>
+                        </div>
+                        <div className="p-5 space-y-3 max-h-64 overflow-y-auto">
+                            {syncConflictData.comparison && syncConflictData.comparison.hasDifferences ? (
+                                <div className="space-y-2">
+                                    {syncConflictData.comparison.differences.map((diff, i) => (
+                                        <div key={i} className={`px-3 py-2 rounded-lg text-xs border ${isDark ? 'border-[#4a474a] bg-[#221f22]' : 'border-[#e1d5e3] bg-[#f5ecf7]'}`}>
+                                            <p className="font-semibold">{diff.description}</p>
+                                            {Array.isArray(diff.items) && diff.items.length > 0 && diff.items[0]?.changes && (
+                                                <ul className={`mt-1 text-[10px] ${themeClasses.textMuted} list-disc list-inside`}>
+                                                    {diff.items.slice(0, 4).map((item, j) => (
+                                                        <li key={j}>{item.name}: {(item.changes || []).join('; ')}</li>
+                                                    ))}
+                                                </ul>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            ) : (
+                                <p className={`text-sm ${themeClasses.textSecondary}`}>Both sides have unseen changes. Choose which version to keep.</p>
+                            )}
+                        </div>
+                        <div className="p-4 bg-gray-50/5 border-t space-y-2">
+                            <p className={`text-[11px] font-bold ${themeClasses.textMuted} mb-2`}>Which version do you want to keep?</p>
+                            <div className="flex gap-2">
+                                <button
+                                    type="button"
+                                    onClick={handleResolveConflictKeepFile}
+                                    className={`flex-1 py-2.5 rounded-lg text-xs font-bold transition-all active:scale-95 ${isDark ? 'bg-[#78dce8]/10 text-[#78dce8] border border-[#78dce8]/30 hover:bg-[#78dce8]/20' : 'bg-[#e8f4f7] text-[#13677a] border border-[#2188a0]/30 hover:bg-[#d0ecf2]'}`}
+                                >
+                                    Keep File Version
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={handleResolveConflictKeepLocal}
+                                    className={`flex-1 py-2.5 rounded-lg text-xs font-bold transition-all active:scale-95 ${themeClasses.btnPrimary}`}
+                                >
+                                    Keep My Local Data
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Restore Choice Modal */}
+            {showRestoreChoiceModal && pendingRestoreData && (
                 <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[100] p-4 backdrop-blur-xs">
                     <div className={`rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden border animate-in fade-in zoom-in-95 duration-200 ${themeClasses.cardBg}`}>
                         <div className="p-5 border-b flex items-center gap-3 bg-gray-50/5">
-                            <AlertCircle className="flex-shrink-0 text-yellow-400" size={24} />
-                            <h3 className={`font-extrabold text-lg tracking-tight ${themeClasses.textPrimary}`}>
-                                {autoBackupMode === 'setup' ? 'Encrypt Auto-Backups' : 'Unlock Auto-Backups'}
-                            </h3>
+                            <Upload className="flex-shrink-0 text-emerald-400" size={22} />
+                            <div>
+                                <h3 className={`font-extrabold text-base tracking-tight ${themeClasses.textPrimary}`}>Restore from Backup</h3>
+                                <p className={`text-xs ${themeClasses.textMuted} truncate max-w-[220px]`}>{pendingRestoreData.fileName}</p>
+                            </div>
                         </div>
-                        <div className={`p-5 text-sm leading-relaxed font-medium transition-colors duration-300 ${themeClasses.textSecondary}`}>
-                            {autoBackupMode === 'setup' ? (
-                                <p>Your browser has unencrypted auto-backups. Set a password to encrypt them with AES-256 for FIPPA compliance.</p>
-                            ) : (
-                                <p>Enter your password to decrypt and restore your auto-backups.</p>
-                            )}
+                        <div className={`p-5 text-sm leading-relaxed ${themeClasses.textSecondary}`}>
+                            <div className="space-y-3">
+                                <p>How would you like to restore this backup?</p>
+                                <div className={`px-3 py-2 rounded-lg text-xs space-y-1 ${isDark ? 'bg-[#221f22]' : 'bg-[#f5f0ec]'}`}>
+                                    <p><strong>{pendingRestoreData.normalized.folders.length}</strong> folders</p>
+                                    <p><strong>{pendingRestoreData.normalized.classes.length}</strong> groups</p>
+                                    <p><strong>{pendingRestoreData.normalized.students.length}</strong> contacts</p>
+                                </div>
+                            </div>
                         </div>
-                        <div className="p-5 space-y-3">
-                            <label className="block text-[11px] font-bold text-gray-600 dark:text-gray-300">
-                                {autoBackupMode === 'setup' ? 'Set Encryption Password' : 'Enter Decryption Password'}
-                            </label>
-                            <input
-                                type="password"
-                                value={autoBackupPassword}
-                                onChange={(e) => setAutoBackupPassword(e.target.value)}
-                                placeholder={autoBackupMode === 'setup' ? 'Choose a strong password' : 'Enter your password'}
-                                className={`w-full text-xs p-2.5 rounded-lg border outline-none transition-all ${themeClasses.inputBg}`}
-                                autoFocus
-                                onKeyDown={(e) => {
-                                    if (e.key === 'Enter') {
-                                        autoBackupMode === 'setup' ? handleSetAutoBackupPassword() : handleDecryptAutoBackup();
-                                    }
-                                }}
-                            />
-                            {autoBackupMode === 'setup' && (
-                                <>
-                                    <label className="block text-[11px] font-bold text-gray-600 dark:text-gray-300">Confirm Password</label>
-                                    <input
-                                        type="password"
-                                        value={autoBackupPasswordConfirm}
-                                        onChange={(e) => setAutoBackupPasswordConfirm(e.target.value)}
-                                        placeholder="Confirm your password"
-                                        className={`w-full text-xs p-2.5 rounded-lg border outline-none transition-all ${themeClasses.inputBg}`}
-                                        onKeyDown={(e) => {
-                                            if (e.key === 'Enter') handleSetAutoBackupPassword();
-                                        }}
-                                    />
-                                </>
-                            )}
-                            <p className="text-[10px] text-gray-500 dark:text-gray-400 font-medium">
-                                Store this password securely — you will need it to access auto-backups in future sessions.
-                            </p>
-                        </div>
-                        <div className="p-4 bg-gray-50/5 border-t flex justify-end gap-2">
+                        <div className="p-4 bg-gray-50/5 border-t space-y-2">
                             <button
                                 type="button"
-                                onClick={handleSkipAutoBackupEncryption}
-                                className={`px-4 py-2 rounded-lg text-xs font-bold transition-all active:scale-95 ${themeClasses.btnSecondary}`}
+                                onClick={handleRestoreReplaceAll}
+                                className={`w-full py-2.5 rounded-lg text-xs font-bold transition-all active:scale-95 ${isDark ? 'bg-rose-500/10 text-rose-400 border border-rose-500/30 hover:bg-rose-500/20' : 'bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100'}`}
                             >
-                                Skip
+                                Replace All Data
+                                <span className={`block text-[10px] font-normal mt-0.5 ${isDark ? 'text-rose-400/70' : 'text-rose-500/70'}`}>Overwrites everything with the backup</span>
                             </button>
                             <button
                                 type="button"
-                                onClick={autoBackupMode === 'setup' ? handleSetAutoBackupPassword : handleDecryptAutoBackup}
-                                className={`px-4 py-2 rounded-lg text-xs font-bold transition-all active:scale-95 ${themeClasses.btnPrimary}`}
+                                onClick={handleRestoreImportNew}
+                                className={`w-full py-2.5 rounded-lg text-xs font-bold transition-all active:scale-95 ${themeClasses.btnSecondary}`}
                             >
-                                {autoBackupMode === 'setup' ? 'Encrypt & Continue' : 'Unlock'}
+                                Import New Items Only
+                                <span className={`block text-[10px] font-normal mt-0.5 ${themeClasses.textMuted}`}>Only adds items not already in your data</span>
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => { setShowRestoreChoiceModal(false); setPendingRestoreData(null); }}
+                                className={`w-full py-1.5 rounded-lg text-xs font-bold transition-all ${themeClasses.textMuted} hover:underline`}
+                            >
+                                Cancel
                             </button>
                         </div>
                     </div>
                 </div>
             )}
+
 
             {/* --- CUSTOM DIALOG OVERLAY (Replaces window.confirm & window.alert) --- */}
             {customDialog.isOpen && (
