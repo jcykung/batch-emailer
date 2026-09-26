@@ -119,6 +119,43 @@ function getCanonicalData(folders = null, classes = null, students = null) {
     return { folders: cleanFolders, classes: cleanClasses, students: cleanStudents };
 }
 
+function normalizeImportedData(importedData) {
+    if (!importedData || typeof importedData !== 'object') {
+        throw new Error("Invalid file content");
+    }
+    const folders = Array.isArray(importedData.folders) ? importedData.folders : [];
+    const classes = Array.isArray(importedData.classes) ? importedData.classes : [];
+    let students = Array.isArray(importedData.students) ? importedData.students : [];
+
+    // Schema migration for imported datasets
+    students = students.map(student => {
+        let updatedStudent = { ...student };
+
+        if (!updatedStudent.emails) {
+            const emails = [];
+            if (updatedStudent.email1 && updatedStudent.email1.trim()) emails.push(updatedStudent.email1.trim());
+            if (updatedStudent.email2 && updatedStudent.email2.trim()) emails.push(updatedStudent.email2.trim());
+            if (emails.length === 0) emails.push('');
+            updatedStudent.emails = emails;
+        }
+
+        if (!updatedStudent.emailHistory) {
+            const history = [];
+            if (updatedStudent.message || updatedStudent.timestamp) {
+                history.push({
+                    id: generateId(),
+                    timestamp: updatedStudent.timestamp || new Date().toISOString(),
+                    message: updatedStudent.message || ''
+                });
+            }
+            updatedStudent.emailHistory = history;
+        }
+        return updatedStudent;
+    });
+
+    return { folders, classes, students };
+}
+
 function computeDataHashSync(canonicalData) {
     const str = JSON.stringify(canonicalData);
     let hash = 5381;
@@ -148,20 +185,15 @@ function getDeviceId() {
 
 function getDeviceName() {
     const ua = navigator.userAgent;
-    let os = 'Unknown Device';
-    if (/Macintosh|Mac OS X/i.test(ua)) os = 'Mac';
-    else if (/Windows/i.test(ua)) os = 'Windows';
-    else if (/Android/i.test(ua)) os = 'Android';
-    else if (/iPhone|iPad|iPod/i.test(ua)) os = 'iOS';
-    else if (/Linux/i.test(ua)) os = 'Linux';
-
-    let browser = 'Browser';
-    if (/Edg/i.test(ua)) browser = 'Edge';
-    else if (/Chrome/i.test(ua)) browser = 'Chrome';
-    else if (/Safari/i.test(ua)) browser = 'Safari';
-    else if (/Firefox/i.test(ua)) browser = 'Firefox';
-
-    return `${os} • ${browser}`;
+    if (/iPhone/i.test(ua)) return "iPhone";
+    if (/iPad/i.test(ua)) return "iPad";
+    if (/Macintosh|Mac OS X/i.test(ua)) {
+        return screen.width >= 2560 ? "iMac / Mac" : "MacBook";
+    }
+    if (/Windows/i.test(ua)) return "PC";
+    if (/Android/i.test(ua)) return "Android";
+    if (/Linux/i.test(ua)) return "Linux";
+    return "Browser";
 }
 
 const SYNC_META_KEY = 'batch-emailer-sync-meta';
@@ -184,6 +216,21 @@ function setSyncMeta(updates) {
     } catch {
         return {};
     }
+}
+
+function syncNeedsPush(currentData = null) {
+    const meta = getSyncMeta();
+    if (!meta.fileName) return false;
+    if ((meta.lastLocalChange || 0) > (meta.lastSyncedAt || 0)) {
+        return true;
+    }
+    if (currentData && meta.baseFastHash) {
+        const currentFastHash = computeDataHashSync(getCanonicalData(currentData));
+        if (currentFastHash !== meta.baseFastHash) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // --- Fingerprinting & Difference Engine ---
@@ -385,6 +432,52 @@ async function saveFileAs(content, defaultFilename, mimeType = "application/json
     return null;
 }
 
+// ---- File System Access Helpers (Chrome/Edge/Arc) ----
+async function pickSyncFile() {
+    if (window.showOpenFilePicker) {
+        try {
+            const [handle] = await window.showOpenFilePicker({
+                types: [{ description: "JSON File", accept: { "application/json": [".json"] } }],
+                excludeAcceptAllOption: true
+            });
+            return handle;
+        } catch (e) {
+            if (e.name === "AbortError") return null;
+            throw e;
+        }
+    }
+
+    if (window.showSaveFilePicker) {
+        try {
+            return await window.showSaveFilePicker({
+                suggestedName: "batch_emailer_sync.json",
+                types: [{ description: "JSON File", accept: { "application/json": [".json"] } }]
+            });
+        } catch (e) {
+            if (e.name === "AbortError") return null;
+            throw e;
+        }
+    }
+    return null;
+}
+
+async function readSyncFile(handle) {
+    const file = await handle.getFile();
+    const text = await file.text();
+    let parsed = null;
+    let fileHasData = false;
+    const fileHasContent = !!(text && text.trim());
+    if (fileHasContent) {
+        try {
+            parsed = await parseExport(text);
+            fileHasData = parsed && parsed.version === 2 && (Array.isArray(parsed.folders) || Array.isArray(parsed.classes) || Array.isArray(parsed.students));
+        } catch {
+            fileHasData = false;
+        }
+    }
+    return { file, fileLastModified: file.lastModified || 0, parsed, fileHasData, fileHasContent };
+}
+
 // --- Local CSV Parser Utility ---
 const parseCSV = (text) => {
     const lines = [];
@@ -539,30 +632,81 @@ export default function App() {
     }, [data, setData]);
 
     // Sync & Backup State (Universal Architecture)
-    const [syncStatus, setSyncStatus] = useState('idle'); // 'idle' | 'syncing' | 'synced' | 'local-changes' | 'error'
+    const [syncStatus, setSyncStatus] = useState('idle'); // 'idle' | 'syncing' | 'synced' | 'local-changes' | 'external-update' | 'error'
     const [syncFileName, setSyncFileName] = useState('');
     const [showSyncConflictModal, setShowSyncConflictModal] = useState(false);
     const [syncConflictData, setSyncConflictData] = useState(null);
     const [showRestoreChoiceModal, setShowRestoreChoiceModal] = useState(false);
     const [pendingRestoreData, setPendingRestoreData] = useState(null);
+    const [syncToast, setSyncToast] = useState(null);
+    const [externalBanner, setExternalBanner] = useState(null);
 
-    // Note local change for fast hash diffing
-    const noteLocalChange = (updatedData) => {
+    const showSyncToast = (message, type = "info") => {
+        setSyncToast({ message, type, id: Date.now() });
+    };
+
+    useEffect(() => {
+        if (!syncToast) return;
+        const timer = setTimeout(() => {
+            setSyncToast(null);
+        }, 4000);
+        return () => clearTimeout(timer);
+    }, [syncToast]);
+
+    // Check for external updates from other devices (e.g. cloud folder sync)
+    const checkForExternalChanges = async () => {
+        const hasFSA = !!(window.showSaveFilePicker || window.showOpenFilePicker);
+        if (!hasFSA) return;
+
         const meta = getSyncMeta();
-        if (meta.baseFastHash && updatedData) {
-            const currentFastHash = computeDataHashSync(getCanonicalData(updatedData));
-            if (currentFastHash !== meta.baseFastHash) {
-                setSyncStatus('local-changes');
-            } else {
-                setSyncStatus('synced');
+        if (!meta.fileName) return;
+
+        const handle = await getSyncHandle();
+        if (!handle) return;
+
+        try {
+            const perm = await handle.queryPermission({ mode: "readwrite" });
+            if (perm !== "granted") return;
+
+            const file = await handle.getFile();
+            if (file.lastModified > (meta.lastSyncedAt || 0)) {
+                const text = await file.text();
+                const parsed = await parseExport(text);
+                if (parsed && (Array.isArray(parsed.folders) || Array.isArray(parsed.classes) || Array.isArray(parsed.students))) {
+                    const normalized = normalizeImportedData(parsed);
+                    const fileCanonical = getCanonicalData(normalized);
+                    const fileHash = await computeDataHash(fileCanonical);
+                    if (fileHash && fileHash !== meta.lastSyncedContentHash) {
+                        setSyncMeta({
+                            externalUpdateAvailable: true,
+                            externalUpdateAuthor: parsed.syncMeta?.deviceName || ""
+                        });
+                        const author = parsed.syncMeta?.deviceName ? ` on ${parsed.syncMeta.deviceName}` : "";
+                        setExternalBanner(`"${meta.fileName}" was updated${author} — click Sync Now to pull.`);
+                        setSyncStatus('external-update');
+                    }
+                }
             }
+        } catch (e) {
+            console.warn("[Sync] external change check:", e);
         }
     };
 
+    const isFirstMount = useRef(true);
+
     // Automatic Browser Backup to IndexedDB on data changes + change tracking
     useEffect(() => {
+        if (isFirstMount.current) {
+            isFirstMount.current = false;
+            return;
+        }
         if (data) {
-            noteLocalChange(data);
+            const now = Date.now();
+            setSyncMeta({ lastLocalChange: now });
+            const meta = getSyncMeta();
+            if (meta.fileName) {
+                setSyncStatus('local-changes');
+            }
             if (data.folders.length > 0 || data.classes.length > 0 || data.students.length > 0) {
                 saveAutoBackupToIDB(data);
             }
@@ -574,22 +718,30 @@ export default function App() {
         const initSync = async () => {
             try {
                 const meta = getSyncMeta();
-                if (meta.fileName) {
-                    setSyncFileName(meta.fileName);
-                }
+                let currentFileName = meta.fileName || '';
                 const handle = await getSyncHandle();
                 if (handle) {
-                    setSyncFileName(handle.name);
+                    currentFileName = handle.name;
+                    setSyncMeta({ fileName: handle.name });
                 }
-                if (meta.baseFastHash && data) {
-                    const currentFastHash = computeDataHashSync(getCanonicalData(data));
-                    if (currentFastHash !== meta.baseFastHash) {
-                        setSyncStatus('local-changes');
-                    } else {
-                        setSyncStatus('synced');
-                    }
+                if (currentFileName) {
+                    setSyncFileName(currentFileName);
+                }
+
+                if (meta.externalUpdateAvailable && currentFileName) {
+                    setSyncStatus('external-update');
+                    const author = meta.externalUpdateAuthor ? ` on ${meta.externalUpdateAuthor}` : "";
+                    setExternalBanner(`"${currentFileName}" was updated${author} — click Sync Now to pull.`);
+                } else if (syncNeedsPush(data)) {
+                    setSyncStatus('local-changes');
+                } else if (currentFileName) {
+                    setSyncStatus('synced');
                 } else {
                     setSyncStatus('idle');
+                }
+
+                if (handle) {
+                    checkForExternalChanges();
                 }
             } catch (err) {
                 console.warn("Failed to initialize sync state:", err);
@@ -597,6 +749,34 @@ export default function App() {
         };
         initSync();
     }, []);
+
+    // Tab Focus & Visibility Detection + beforeunload warning for unsynced changes
+    useEffect(() => {
+        const onBeforeUnload = (e) => {
+            if (syncNeedsPush(data) && getSyncMeta().fileName) {
+                e.preventDefault();
+                e.returnValue = "";
+            }
+        };
+        const onVisibilityChange = () => {
+            if (document.visibilityState === "visible") {
+                checkForExternalChanges();
+            }
+        };
+        const onFocus = () => {
+            checkForExternalChanges();
+        };
+
+        window.addEventListener("beforeunload", onBeforeUnload);
+        document.addEventListener("visibilitychange", onVisibilityChange);
+        window.addEventListener("focus", onFocus);
+
+        return () => {
+            window.removeEventListener("beforeunload", onBeforeUnload);
+            document.removeEventListener("visibilitychange", onVisibilityChange);
+            window.removeEventListener("focus", onFocus);
+        };
+    }, [data]);
 
     // Handle auto-collapsing sidebar on mount for smaller mobile screens
     useEffect(() => {
@@ -1196,43 +1376,6 @@ export default function App() {
 
     // --- Universal Sync & Backup System Handlers ---
 
-    const normalizeImportedData = (importedData) => {
-        if (!importedData || typeof importedData !== 'object') {
-            throw new Error("Invalid file content");
-        }
-        const folders = Array.isArray(importedData.folders) ? importedData.folders : [];
-        const classes = Array.isArray(importedData.classes) ? importedData.classes : [];
-        let students = Array.isArray(importedData.students) ? importedData.students : [];
-
-        // Schema migration for imported datasets
-        students = students.map(student => {
-            let updatedStudent = { ...student };
-
-            if (!updatedStudent.emails) {
-                const emails = [];
-                if (updatedStudent.email1 && updatedStudent.email1.trim()) emails.push(updatedStudent.email1.trim());
-                if (updatedStudent.email2 && updatedStudent.email2.trim()) emails.push(updatedStudent.email2.trim());
-                if (emails.length === 0) emails.push('');
-                updatedStudent.emails = emails;
-            }
-
-            if (!updatedStudent.emailHistory) {
-                const history = [];
-                if (updatedStudent.message || updatedStudent.timestamp) {
-                    history.push({
-                        id: generateId(),
-                        timestamp: updatedStudent.timestamp || new Date().toISOString(),
-                        message: updatedStudent.message || ''
-                    });
-                }
-                updatedStudent.emailHistory = history;
-            }
-            return updatedStudent;
-        });
-
-        return { folders, classes, students };
-    };
-
     const buildSyncJSON = async (revision = 1, currentData = null) => {
         const activeData = currentData || data;
         const canonicalData = getCanonicalData(activeData);
@@ -1275,222 +1418,395 @@ export default function App() {
             }
         }
         const { jsonStr, canonicalData, contentHash } = await buildSyncJSON(revision, activeData);
-        const writable = await handle.createWritable();
-        await writable.write(jsonStr);
-        await writable.close();
-
+        try {
+            const writable = await handle.createWritable();
+            await writable.write(jsonStr);
+            await writable.close();
+        } catch (e) {
+            if (e.name === "NotAllowedError") {
+                throw new Error("Permission denied — the file may have been moved or deleted.");
+            } else if (e.name === "NotFoundError") {
+                throw new Error("File not found — it may have been moved or deleted.");
+            } else if (e.name === "NotReadableError") {
+                throw new Error("File is not readable — it may be open in another app.");
+            }
+            throw e;
+        }
+        const syncedAt = Date.now();
         const fastHash = computeDataHashSync(canonicalData);
-        setSyncMeta({
-            fileName: handle.name,
-            baseRevision: revision,
-            lastSyncedRevision: revision,
-            baseContentHash: contentHash,
-            lastSyncedContentHash: contentHash,
-            baseFastHash: fastHash,
-            lastSyncedAt: Date.now()
-        });
-        setSyncFileName(handle.name);
-        setSyncStatus('synced');
-        return true;
+        return { syncedAt, contentHash, fastHash, canonicalData };
     };
 
-    const executeSyncResolution = async ({ parsed, file, handle = null, currentData = null, onPushRequired = null }) => {
+    const executeSyncResolution = async ({ parsed, file, handle = null, isFirstSetup = false, currentData = null, onPushRequired = null }) => {
         const activeData = currentData || data;
         const meta = getSyncMeta();
         const localCanonical = getCanonicalData(activeData);
         const localHash = await computeDataHash(localCanonical);
+        const localFastHash = computeDataHashSync(localCanonical);
 
-        const fileNormalized = normalizeImportedData(parsed);
-        const fileCanonical = getCanonicalData(fileNormalized);
-        const fileHash = await computeDataHash(fileCanonical);
+        let fileNormalized = null;
+        let fileCanonical = null;
+        let fileHash = null;
+        let fileFastHash = null;
+
+        if (parsed) {
+            fileNormalized = normalizeImportedData(parsed);
+            fileCanonical = getCanonicalData(fileNormalized);
+            fileHash = await computeDataHash(fileCanonical);
+            fileFastHash = computeDataHashSync(fileCanonical);
+        }
+
         const fileMeta = parsed?.syncMeta || null;
         const fileRevision = Number.isFinite(fileMeta?.revision) ? fileMeta.revision : 1;
         const fileName = file?.name || meta.fileName || "batch_emailer_sync.json";
 
+        const doPull = () => {
+            setData(fileNormalized);
+            setActiveFolderId(null);
+            setActiveClassId(null);
+            const syncedAt = Date.now();
+            setSyncMeta({
+                fileName,
+                lastSyncedRevision: fileRevision,
+                lastSyncedContentHash: fileHash,
+                baseRevision: fileRevision,
+                baseContentHash: fileHash,
+                baseFastHash: fileFastHash,
+                lastSyncedAt: syncedAt,
+                lastLocalChange: syncedAt,
+                externalUpdateAvailable: false,
+                externalUpdateAuthor: null
+            });
+            setSyncFileName(fileName);
+            setSyncStatus('synced');
+            showSyncToast(`Synced — pulled updates from ${fileName}.`, 'success');
+        };
+
+        const doPush = async (rev) => {
+            if (handle) {
+                const { syncedAt, contentHash, fastHash } = await pushToHandle(handle, rev, activeData);
+                setSyncMeta({
+                    fileName,
+                    lastSyncedRevision: rev,
+                    lastSyncedContentHash: contentHash,
+                    baseRevision: rev,
+                    baseContentHash: contentHash,
+                    baseFastHash: fastHash,
+                    lastSyncedAt: syncedAt,
+                    lastLocalChange: syncedAt,
+                    externalUpdateAvailable: false,
+                    externalUpdateAuthor: null
+                });
+                setSyncFileName(fileName);
+                setSyncStatus('synced');
+                showSyncToast(`Synced — pushed changes to ${fileName}.`, 'success');
+            } else if (onPushRequired) {
+                await onPushRequired(rev, localHash);
+            }
+        };
+
         // Case 0: Hashes identical
         if (fileHash && localHash === fileHash) {
+            const syncedAt = Date.now();
             setSyncMeta({
                 fileName,
                 lastSyncedRevision: fileRevision,
                 lastSyncedContentHash: localHash,
                 baseRevision: fileRevision,
                 baseContentHash: localHash,
-                baseFastHash: computeDataHashSync(localCanonical),
-                lastSyncedAt: Date.now()
+                baseFastHash: localFastHash,
+                lastSyncedAt: syncedAt,
+                lastLocalChange: syncedAt,
+                externalUpdateAvailable: false,
+                externalUpdateAuthor: null
             });
             setSyncFileName(fileName);
             setSyncStatus('synced');
-            showAlert("In Sync", "Local data and sync file are already identical.");
+            showSyncToast("Already in sync.", "info");
             return;
         }
 
-        // Case 1: Initial setup where one side is empty
+        // Case 1: First-time setup when one side has no data
         const localEmpty = activeData.folders.length === 0 && activeData.classes.length === 0 && activeData.students.length === 0;
-        const fileEmpty = fileNormalized.folders.length === 0 && fileNormalized.classes.length === 0 && fileNormalized.students.length === 0;
+        const fileEmpty = !!(fileNormalized && fileNormalized.folders.length === 0 && fileNormalized.classes.length === 0 && fileNormalized.students.length === 0);
 
-        if (localEmpty && !fileEmpty) {
-            setData(fileNormalized);
-            setActiveFolderId(null);
-            setActiveClassId(null);
-            setSyncMeta({
-                fileName,
-                baseRevision: fileRevision,
-                lastSyncedRevision: fileRevision,
-                baseContentHash: fileHash,
-                lastSyncedContentHash: fileHash,
-                baseFastHash: computeDataHashSync(fileCanonical),
-                lastSyncedAt: Date.now()
-            });
-            setSyncFileName(fileName);
-            setSyncStatus('synced');
-            showAlert("Sync Complete", `Loaded data from ${fileName}.`);
-            return;
-        }
-
-        if (!localEmpty && fileEmpty) {
-            if (handle) {
-                await pushToHandle(handle, 1, activeData);
-            } else if (onPushRequired) {
-                await onPushRequired(1);
+        if (isFirstSetup) {
+            if (!fileEmpty && localEmpty) {
+                doPull();
+                return;
+            } else if (fileEmpty && !localEmpty) {
+                await doPush(1);
+                return;
             }
-            setSyncFileName(fileName);
-            setSyncStatus('synced');
-            showAlert("Sync Complete", `Initial sync saved to ${fileName}.`);
-            return;
         }
 
         // Case 2: 3-Way check against base
-        const baseHash = meta.baseContentHash || null;
-        const localChanged = baseHash ? (localHash !== baseHash) : true;
-        const fileChanged = baseHash ? (fileHash !== baseHash) : true;
+        const baseHash = meta.baseContentHash || meta.lastSyncedContentHash || null;
+        const baseRev = meta.baseRevision || meta.lastSyncedRevision || 0;
 
-        if (!localChanged && fileChanged) {
-            // Silent Pull
-            setData(fileNormalized);
-            setActiveFolderId(null);
-            setActiveClassId(null);
-            setSyncMeta({
-                fileName,
-                baseRevision: fileRevision,
-                lastSyncedRevision: fileRevision,
-                baseContentHash: fileHash,
-                lastSyncedContentHash: fileHash,
-                baseFastHash: computeDataHashSync(fileCanonical),
-                lastSyncedAt: Date.now()
-            });
-            setSyncFileName(fileName);
-            setSyncStatus('synced');
-            showAlert("Sync Complete", `Updated local data from ${fileName}.`);
-        } else if (localChanged && !fileChanged) {
-            // Silent Push
-            const nextRev = (meta.baseRevision || 0) + 1;
-            if (handle) {
-                await pushToHandle(handle, nextRev, activeData);
-            } else if (onPushRequired) {
-                await onPushRequired(nextRev);
-            }
-            setSyncFileName(fileName);
-            setSyncStatus('synced');
-            showAlert("Sync Complete", `Saved your latest changes to ${fileName}.`);
-        } else {
-            // True Conflict (or first sync with data on both sides)
-            const localFP = generateDataFingerprint(activeData);
-            const fileFP = generateDataFingerprint(fileNormalized);
-            const comparison = compareFingerprints(localFP, fileFP);
+        // Has local genuinely changed since last sync?
+        const localChanged = baseHash ? (localHash !== baseHash) : syncNeedsPush(activeData);
 
-            setSyncConflictData({
-                comparison,
-                parsed: fileNormalized,
-                fileRevision,
-                fileHash,
-                fileCanonical,
-                handle,
-                onPushRequired,
-                fileName
-            });
-            setShowSyncConflictModal(true);
+        // Has the file changed since this device last synced?
+        const fileChanged = baseHash ? (fileHash !== baseHash) : (fileRevision > baseRev);
+
+        // Only file changed -> clean PULL
+        if (fileChanged && !localChanged) {
+            doPull();
+            return;
         }
+
+        // Only local changed -> clean PUSH
+        if (localChanged && !fileChanged) {
+            const nextRev = Math.max(fileRevision, baseRev) + 1;
+            await doPush(nextRev);
+            return;
+        }
+
+        // Both changed -> True conflict
+        const localFP = generateDataFingerprint(activeData);
+        const fileFP = generateDataFingerprint(fileNormalized);
+        const comparison = compareFingerprints(localFP, fileFP) || { differences: [], hasDifferences: true };
+        comparison.localDevice = `${getDeviceName()} (unsynced edits)`;
+        comparison.fileDevice = fileMeta?.deviceName ? `${fileMeta.deviceName} (rev ${fileRevision})` : `Sync file (rev ${fileRevision})`;
+
+        setSyncConflictData({
+            comparison,
+            parsed: fileNormalized,
+            fileRevision,
+            fileHash,
+            fileFastHash,
+            fileCanonical,
+            handle,
+            onPushRequired,
+            fileName
+        });
+        setShowSyncConflictModal(true);
     };
 
-    const handleSync = async () => {
-        setSyncStatus('syncing');
+    const syncWithHandle = async (handle, isFirstSetup = false) => {
+        let perm;
         try {
-            if (window.showOpenFilePicker) {
-                // File System Access API supported (Chrome, Edge, Arc)
-                let handle = await getSyncHandle();
-                let needPick = !handle;
+            perm = await handle.queryPermission({ mode: "readwrite" });
+        } catch (e) {
+            showSyncToast("Can't check file permission — " + e.message, "error");
+            return;
+        }
 
+        if (perm !== "granted") {
+            try {
+                perm = await handle.requestPermission({ mode: "readwrite" });
+            } catch (e) {
+                showSyncToast("Can't request file permission — " + e.message, "error");
+                return;
+            }
+            if (perm !== "granted") {
+                showSyncToast("Permission denied — click Sync and choose the file again.", "error");
+                return;
+            }
+        }
+
+        let fileResult;
+        try {
+            fileResult = await readSyncFile(handle);
+        } catch (e) {
+            showSyncToast("Can't read sync file — " + e.message, "error");
+            return;
+        }
+
+        const { file, parsed } = fileResult;
+        await executeSyncResolution({
+            parsed,
+            file,
+            handle,
+            isFirstSetup,
+            currentData: data
+        });
+    };
+
+    const autoSync = async () => {
+        if (syncStatus === 'syncing') return;
+        setSyncStatus('syncing');
+        setExternalBanner(null);
+        setSyncMeta({ externalUpdateAvailable: false, externalUpdateAuthor: null });
+
+        try {
+            const hasFSA = !!(window.showSaveFilePicker || window.showOpenFilePicker);
+            const meta = getSyncMeta();
+            const hadFileBefore = !!meta.fileName;
+
+            if (hasFSA) {
+                let handle = await getSyncHandle();
                 if (handle) {
                     try {
-                        if (handle.queryPermission) {
-                            let perm = await handle.queryPermission({ mode: 'readwrite' });
-                            if (perm !== 'granted') {
-                                perm = await handle.requestPermission({ mode: 'readwrite' });
+                        await syncWithHandle(handle, false);
+                    } catch (e) {
+                        console.error("[Sync] sync error with handle:", e);
+                        const isHandleError = e.name === "NotFoundError" || e.name === "NotReadableError"
+                            || e.name === "NotAllowedError" || e.name === "SecurityError";
+                        if (isHandleError) {
+                            await clearSyncHandle();
+                            showSyncToast(`Connection to "${meta.fileName}" lost — please choose the file again.`, "warn");
+                            const newHandle = await pickSyncFile();
+                            if (newHandle) {
+                                await setSyncHandle(newHandle);
+                                setSyncFileName(newHandle.name);
+                                setSyncMeta({ fileName: newHandle.name });
+                                await syncWithHandle(newHandle, true);
                             }
-                            if (perm !== 'granted') needPick = true;
+                        } else {
+                            showSyncToast("Sync failed: " + (e.message || "unknown error"), "error");
+                            setSyncStatus('error');
                         }
-                    } catch {
-                        needPick = true;
+                    }
+                } else if (hadFileBefore) {
+                    showSyncToast(`Please choose "${meta.fileName}" to reconnect.`, "info");
+                    const newHandle = await pickSyncFile();
+                    if (newHandle) {
+                        await setSyncHandle(newHandle);
+                        setSyncFileName(newHandle.name);
+                        setSyncMeta({ fileName: newHandle.name });
+                        await syncWithHandle(newHandle, true);
+                    }
+                } else {
+                    // First time setup
+                    const newHandle = await pickSyncFile();
+                    if (newHandle) {
+                        await setSyncHandle(newHandle);
+                        setSyncFileName(newHandle.name);
+                        setSyncMeta({ fileName: newHandle.name });
+                        await syncWithHandle(newHandle, true);
                     }
                 }
-
-                if (needPick) {
-                    const pickerHandles = await window.showOpenFilePicker({
-                        multiple: false,
-                        types: [{ description: "JSON Sync File", accept: { "application/json": [".json"] } }]
-                    });
-                    handle = pickerHandles[0];
-                    if (!handle) {
-                        setSyncStatus('idle');
-                        return;
-                    }
-                    await setSyncHandle(handle);
-                }
-
-                const file = await handle.getFile();
-                const text = await file.text();
-                const parsed = await parseExport(text);
-                await executeSyncResolution({ parsed, file, handle, currentData: data });
             } else {
-                // Non-FSA fallback (Safari, Firefox, Mobile)
-                const input = document.createElement('input');
-                input.type = 'file';
-                input.accept = '.json';
-                input.onchange = async (e) => {
-                    const file = e.target.files?.[0];
-                    if (!file) {
-                        setSyncStatus('idle');
-                        return;
-                    }
-                    try {
-                        const text = await file.text();
-                        const parsed = await parseExport(text);
-                        await executeSyncResolution({
-                            parsed,
-                            file,
-                            handle: null,
-                            currentData: data,
-                            onPushRequired: async (nextRev) => {
-                                const { jsonStr } = await buildSyncJSON(nextRev, data);
-                                await saveFileAs(jsonStr, file.name || "batch_emailer_sync.json");
-                            }
-                        });
-                    } catch (err) {
-                        console.error("Sync error:", err);
-                        setSyncStatus('error');
-                        showAlert("Sync Error", "Failed to parse sync file: " + (err.message || err));
-                    }
-                };
-                input.click();
+                // Non-FSA fallback (Safari / Firefox / Mobile)
+                const mobileInput = document.getElementById("mobile-sync-pull-input");
+                if (mobileInput) {
+                    mobileInput.click();
+                }
             }
-        } catch (err) {
-            if (err.name !== 'AbortError') {
-                console.error("Sync failed:", err);
-                setSyncStatus('error');
-                showAlert("Sync Failed", "Could not complete sync: " + (err.message || err));
+        } catch (e) {
+            console.error("[Sync] autoSync unexpected error:", e);
+            showSyncToast("Sync error: " + (e.message || e), "error");
+            setSyncStatus('error');
+        } finally {
+            const meta = getSyncMeta();
+            if (syncNeedsPush(data)) {
+                setSyncStatus('local-changes');
+            } else if (meta.fileName) {
+                setSyncStatus('synced');
             } else {
                 setSyncStatus('idle');
             }
+        }
+    };
+
+    const handleSync = autoSync;
+
+    const mobilePushSync = async (fileName, revision = 1) => {
+        const { jsonStr, canonicalData, contentHash } = await buildSyncJSON(revision, data);
+        const safeName = (fileName || getSyncMeta().fileName || "batch_emailer_sync").replace(/\.json$/i, "") + ".json";
+
+        if (navigator.share && /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent)) {
+            try {
+                const blob = new Blob([jsonStr], { type: "application/json" });
+                const file = new File([blob], safeName, { type: "application/json" });
+                if (navigator.canShare && navigator.canShare({ files: [file] })) {
+                    await navigator.share({ files: [file] });
+                    const syncedAt = Date.now();
+                    const fastHash = computeDataHashSync(canonicalData);
+                    setSyncMeta({
+                        fileName: safeName,
+                        lastSyncedRevision: revision,
+                        lastSyncedContentHash: contentHash,
+                        baseRevision: revision,
+                        baseContentHash: contentHash,
+                        baseFastHash: fastHash,
+                        lastSyncedAt: syncedAt,
+                        lastLocalChange: syncedAt,
+                        externalUpdateAvailable: false,
+                        externalUpdateAuthor: null
+                    });
+                    setSyncFileName(safeName);
+                    setSyncStatus('synced');
+                    showSyncToast(`Synced — saved to ${safeName}.`, "success");
+                    return;
+                }
+            } catch (e) {
+                if (e.name === "AbortError") return;
+            }
+        }
+
+        await saveFileAs(jsonStr, safeName, "application/json");
+        const syncedAt = Date.now();
+        const fastHash = computeDataHashSync(canonicalData);
+        setSyncMeta({
+            fileName: safeName,
+            lastSyncedRevision: revision,
+            lastSyncedContentHash: contentHash,
+            baseRevision: revision,
+            baseContentHash: contentHash,
+            baseFastHash: fastHash,
+            lastSyncedAt: syncedAt,
+            lastLocalChange: syncedAt,
+            externalUpdateAvailable: false,
+            externalUpdateAuthor: null
+        });
+        setSyncFileName(safeName);
+        setSyncStatus('synced');
+        showSyncToast(`Synced — downloaded ${safeName}. Save it to your sync folder.`, "success");
+    };
+
+    const handleMobileSyncPull = async (event) => {
+        const file = event.target.files?.[0];
+        event.target.value = "";
+        if (!file) {
+            setSyncStatus(syncNeedsPush(data) ? 'local-changes' : (syncFileName ? 'synced' : 'idle'));
+            return;
+        }
+
+        setSyncStatus('syncing');
+        try {
+            const text = await file.text();
+            const parsed = await parseExport(text);
+            if (!parsed || typeof parsed !== 'object' || (!Array.isArray(parsed.folders) && !Array.isArray(parsed.classes) && !Array.isArray(parsed.students))) {
+                showSyncToast("That file doesn't contain valid Batch Emailer data.", "error");
+                setSyncStatus('error');
+                return;
+            }
+
+            await executeSyncResolution({
+                parsed,
+                file,
+                handle: null,
+                isFirstSetup: !getSyncMeta().fileName,
+                currentData: data,
+                onPushRequired: async (rev) => {
+                    await mobilePushSync(file.name, rev);
+                }
+            });
+        } catch (e) {
+            console.error("[Sync] mobile pull error:", e);
+            showSyncToast("Error reading sync file: " + e.message, "error");
+            setSyncStatus('error');
+        }
+    };
+
+    const handleChangeSyncFile = async () => {
+        const hasFSA = !!(window.showSaveFilePicker || window.showOpenFilePicker);
+        if (hasFSA) {
+            const handle = await pickSyncFile();
+            if (!handle) return;
+            await setSyncHandle(handle);
+            setSyncFileName(handle.name);
+            setSyncMeta({ fileName: handle.name });
+            await syncWithHandle(handle, true);
+        } else {
+            showConfirm("Change Sync File", "Choose a new sync file on your device?", () => {
+                localStorage.removeItem(SYNC_META_KEY);
+                const input = document.getElementById("mobile-sync-pull-input");
+                if (input) input.click();
+            });
         }
     };
 
@@ -1919,8 +2235,60 @@ export default function App() {
                         </div>
                     </div>
 
-                    {/* Theme Selector Widget */}
+                    {/* Header Controls: Sync + Theme */}
                     <div className="flex items-center gap-2">
+                        {/* Auto Sync Button */}
+                        <button
+                            id="auto-sync-btn"
+                            onClick={autoSync}
+                            disabled={syncStatus === 'syncing'}
+                            className={`relative inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all duration-200 active:scale-95 ${
+                                syncStatus === 'syncing'
+                                    ? 'opacity-70 cursor-not-allowed border-[#4a474a] text-[#78dce8]'
+                                    : syncStatus === 'external-update'
+                                    ? 'border-[#78dce8] text-[#78dce8] bg-[#78dce8]/10 hover:bg-[#78dce8]/20 shadow-sm shadow-[#78dce8]/10'
+                                    : syncStatus === 'local-changes'
+                                    ? 'border-[#fc9867] text-[#fc9867] bg-[#fc9867]/10 hover:bg-[#fc9867]/20 shadow-sm shadow-[#fc9867]/10'
+                                    : syncStatus === 'synced'
+                                    ? isDark
+                                        ? 'border-[#4a474a] bg-[#3a373a] text-[#a9dc76] hover:bg-[#4a474a]'
+                                        : 'border-[#e1d5e3] bg-white text-[#22c55e] hover:bg-gray-50 shadow-sm'
+                                    : isDark
+                                    ? 'border-[#4a474a] bg-[#3a373a] text-zinc-400 hover:bg-[#4a474a] hover:text-zinc-200'
+                                    : 'border-[#e1d5e3] bg-white text-zinc-500 hover:bg-gray-50 hover:text-zinc-700 shadow-sm'
+                            }`}
+                            title={
+                                syncStatus === 'syncing'
+                                    ? 'Syncing in progress…'
+                                    : syncStatus === 'external-update'
+                                    ? 'External updates available! Click to sync.'
+                                    : syncStatus === 'local-changes'
+                                    ? 'Unsynced local changes. Click to sync.'
+                                    : syncStatus === 'synced'
+                                    ? `Connected & synced (${syncFileName || 'sync file'}). Click to sync.`
+                                    : 'Connect a sync file (1-click sync across devices)'
+                            }
+                        >
+                            <RefreshCw
+                                size={14}
+                                className={`transition-transform duration-500 ${syncStatus === 'syncing' ? 'animate-spin' : ''}`}
+                            />
+                            <span className="hidden sm:inline font-medium">Sync</span>
+                            {syncStatus === 'local-changes' && (
+                                <span className="relative flex h-2 w-2 ml-0.5">
+                                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#fc9867] opacity-75"></span>
+                                    <span className="relative inline-flex rounded-full h-2 w-2 bg-[#fc9867]"></span>
+                                </span>
+                            )}
+                            {syncStatus === 'external-update' && (
+                                <span className="relative flex h-2 w-2 ml-0.5">
+                                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#78dce8] opacity-75"></span>
+                                    <span className="relative inline-flex rounded-full h-2 w-2 bg-[#78dce8]"></span>
+                                </span>
+                            )}
+                        </button>
+
+                        {/* Theme Selector Widget */}
                         <button
                             onClick={() => setTheme(isDark ? 'light' : 'dark')}
                             className={`p-2 rounded-xl transition-all duration-300 border active:scale-90 flex items-center justify-center ${isDark
@@ -1933,6 +2301,35 @@ export default function App() {
                         </button>
                     </div>
                 </div>
+
+                {/* External Update Banner */}
+                {externalBanner && (
+                    <div className={`px-4 py-2 text-xs font-semibold flex items-center justify-between border-b transition-all duration-300 ${
+                        isDark
+                            ? 'bg-[#78dce8]/10 border-[#78dce8]/30 text-[#78dce8]'
+                            : 'bg-[#e8f4f7] border-[#78dce8]/50 text-[#13677a]'
+                    }`}>
+                        <div className="flex items-center gap-2 truncate mr-2">
+                            <RefreshCw size={14} className="text-[#78dce8] shrink-0" />
+                            <span className="truncate">{externalBanner}</span>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                            <button
+                                onClick={autoSync}
+                                className="px-2.5 py-1 rounded-md text-xs font-bold bg-[#78dce8] text-[#221f22] hover:bg-[#6bd0dc] transition-all active:scale-95 shadow-xs"
+                            >
+                                Sync Now
+                            </button>
+                            <button
+                                onClick={() => setExternalBanner(null)}
+                                className="p-1 rounded-md hover:bg-black/10 transition-colors"
+                                title="Dismiss"
+                            >
+                                <X size={14} />
+                            </button>
+                        </div>
+                    </div>
+                )}
 
                 {activeClassId ? (
                     <div className="flex-1 flex flex-col h-full overflow-hidden p-4 md:p-8">
@@ -2350,6 +2747,11 @@ export default function App() {
                                             <AlertTriangle size={11} /> Local Changes
                                         </span>
                                     )}
+                                    {syncStatus === 'external-update' && (
+                                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 bg-cyan-500/15 text-cyan-400`}>
+                                            <RefreshCw size={11} className="animate-spin" /> External Update
+                                        </span>
+                                    )}
                                     {syncStatus === 'error' && (
                                         <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 bg-rose-500/15 text-rose-500`}>
                                             <AlertTriangle size={11} /> Error
@@ -2373,19 +2775,29 @@ export default function App() {
                                         <span className="truncate">{syncFileName}</span>
                                     </div>
                                 )}
-                                <div className="flex gap-2">
+                                <div className="flex flex-wrap gap-2">
                                     <button
-                                        onClick={() => { handleSync(); setModals({ ...modals, backup: false }); }}
+                                        onClick={() => { autoSync(); setModals({ ...modals, backup: false }); }}
                                         disabled={syncStatus === 'syncing'}
-                                        className={`flex-1 py-2.5 rounded-lg text-xs font-bold transition-all active:scale-95 flex items-center justify-center gap-1.5 ${syncStatus === 'syncing' ? 'opacity-50 cursor-not-allowed' : ''} ${themeClasses.btnPrimary}`}
+                                        className={`flex-1 min-w-[120px] py-2.5 rounded-lg text-xs font-bold transition-all active:scale-95 flex items-center justify-center gap-1.5 ${syncStatus === 'syncing' ? 'opacity-50 cursor-not-allowed' : ''} ${themeClasses.btnPrimary}`}
                                     >
                                         <RefreshCw size={13} className={syncStatus === 'syncing' ? 'animate-spin' : ''} />
                                         {syncStatus === 'syncing' ? 'Syncing…' : 'Sync Now'}
                                     </button>
                                     {syncFileName && (
                                         <button
+                                            onClick={handleChangeSyncFile}
+                                            className={`py-2.5 px-3 rounded-lg text-xs font-bold transition-all active:scale-95 flex items-center gap-1 ${themeClasses.btnSecondary}`}
+                                            title="Choose a different sync file"
+                                        >
+                                            <FolderOpen size={13} /> Change
+                                        </button>
+                                    )}
+                                    {syncFileName && (
+                                        <button
                                             onClick={handleDisconnectSync}
                                             className={`py-2.5 px-3 rounded-lg text-xs font-bold transition-all active:scale-95 flex items-center gap-1 ${isDark ? 'bg-rose-500/10 text-rose-400 hover:bg-rose-500/20' : 'bg-rose-50 text-rose-600 hover:bg-rose-100'}`}
+                                            title="Disconnect sync file"
                                         >
                                             <CloudOff size={13} /> Disconnect
                                         </button>
@@ -2639,6 +3051,18 @@ export default function App() {
                             </div>
                         </div>
                         <div className="p-5 space-y-3 max-h-64 overflow-y-auto">
+                            {syncConflictData.comparison && (
+                                <div className={`p-2.5 rounded-lg text-xs space-y-1 border ${isDark ? 'border-[#4a474a] bg-[#221f22]' : 'border-[#e1d5e3] bg-gray-50'}`}>
+                                    <div className="flex justify-between items-center">
+                                        <span className="font-semibold text-[#fc9867]">Local:</span>
+                                        <span className={`text-[11px] ${themeClasses.textMuted}`}>{syncConflictData.comparison.localDevice || getDeviceName()}</span>
+                                    </div>
+                                    <div className="flex justify-between items-center">
+                                        <span className="font-semibold text-[#78dce8]">Sync File:</span>
+                                        <span className={`text-[11px] ${themeClasses.textMuted}`}>{syncConflictData.comparison.fileDevice || syncConflictData.fileName}</span>
+                                    </div>
+                                </div>
+                            )}
                             {syncConflictData.comparison && syncConflictData.comparison.hasDifferences ? (
                                 <div className="space-y-2">
                                     {syncConflictData.comparison.differences.map((diff, i) => (
@@ -2772,6 +3196,51 @@ export default function App() {
                             )}
                         </div>
                     </div>
+                </div>
+            )}
+
+            {/* Hidden file input for mobile/non-FSA sync pull */}
+            <input
+                type="file"
+                id="mobile-sync-pull-input"
+                accept=".json"
+                className="hidden"
+                onChange={handleMobileSyncPull}
+            />
+
+            {/* Floating Sync Toast */}
+            {syncToast && (
+                <div
+                    key={syncToast.id}
+                    className={`fixed bottom-6 left-1/2 -translate-x-1/2 z-[200] px-5 py-3 rounded-xl shadow-2xl border text-sm font-semibold flex items-center gap-2.5 max-w-md animate-in fade-in slide-in-from-bottom-4 duration-300 ${
+                        syncToast.type === 'success'
+                            ? isDark
+                                ? 'bg-[#221f22] border-[#a9dc76]/40 text-[#a9dc76] shadow-[#a9dc76]/10'
+                                : 'bg-white border-emerald-300 text-emerald-700 shadow-emerald-100'
+                            : syncToast.type === 'error'
+                            ? isDark
+                                ? 'bg-[#221f22] border-[#ff6188]/40 text-[#ff6188] shadow-[#ff6188]/10'
+                                : 'bg-white border-rose-300 text-rose-700 shadow-rose-100'
+                            : syncToast.type === 'warn'
+                            ? isDark
+                                ? 'bg-[#221f22] border-[#fc9867]/40 text-[#fc9867] shadow-[#fc9867]/10'
+                                : 'bg-white border-amber-300 text-amber-700 shadow-amber-100'
+                            : isDark
+                            ? 'bg-[#221f22] border-[#78dce8]/40 text-[#78dce8] shadow-[#78dce8]/10'
+                            : 'bg-white border-sky-300 text-sky-700 shadow-sky-100'
+                    }`}
+                >
+                    {syncToast.type === 'success' && <CheckCircle2 size={16} className="shrink-0" />}
+                    {syncToast.type === 'error' && <AlertTriangle size={16} className="shrink-0" />}
+                    {syncToast.type === 'warn' && <AlertTriangle size={16} className="shrink-0" />}
+                    {syncToast.type === 'info' && <RefreshCw size={16} className="shrink-0" />}
+                    <span className="truncate">{syncToast.message}</span>
+                    <button
+                        onClick={() => setSyncToast(null)}
+                        className="p-0.5 rounded hover:bg-black/10 transition-colors shrink-0"
+                    >
+                        <X size={14} />
+                    </button>
                 </div>
             )}
 
