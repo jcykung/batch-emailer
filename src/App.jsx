@@ -537,6 +537,9 @@ export default function App() {
     const [selectedStudents, setSelectedStudents] = useState([]);
     const [lastSelectedStudentId, setLastSelectedStudentId] = useState(null);
 
+    // Right-click context menu for contact rows ({ studentId, x, y } or null)
+    const [contextMenu, setContextMenu] = useState(null);
+
     // Dynamic email inputs state for modal
     const [modalEmails, setModalEmails] = useState(['']);
 
@@ -823,6 +826,7 @@ export default function App() {
         if (
             target.closest('button') ||
             target.closest('a') ||
+            target.closest('input') ||
             target.closest('.select-all') ||
             target.closest('svg')
         ) {
@@ -831,6 +835,7 @@ export default function App() {
 
         const orderedIds = classStudents.map(s => s.id);
         const targetIndex = orderedIds.indexOf(studentId);
+        const hasModifier = e.ctrlKey || e.metaKey;
         let newSelection = [...selectedStudents];
 
         if (e.shiftKey && lastSelectedStudentId && orderedIds.includes(lastSelectedStudentId)) {
@@ -839,19 +844,42 @@ export default function App() {
             const end = Math.max(lastIndex, targetIndex);
             const rangeIds = orderedIds.slice(start, end + 1);
 
-            // Combines range with current selection by default
-            newSelection = Array.from(new Set([...selectedStudents, ...rangeIds]));
+            // Shift selects the range; Ctrl/Cmd + Shift appends the range to the selection
+            newSelection = hasModifier
+                ? Array.from(new Set([...selectedStudents, ...rangeIds]))
+                : rangeIds;
+        } else if (hasModifier) {
+            // Ctrl/Cmd toggles a single contact without disturbing the rest of the selection
+            newSelection = selectedStudents.includes(studentId)
+                ? selectedStudents.filter(id => id !== studentId)
+                : [...selectedStudents, studentId];
+            setLastSelectedStudentId(studentId);
         } else {
-            // Act as if ctrl/meta key is held by default: toggle the selection
-            if (selectedStudents.includes(studentId)) {
-                newSelection = selectedStudents.filter(id => id !== studentId);
-            } else {
-                newSelection = [...selectedStudents, studentId];
-            }
+            // Plain click replaces the selection with just this contact
+            newSelection = [studentId];
             setLastSelectedStudentId(studentId);
         }
 
         setSelectedStudents(newSelection);
+    };
+
+    const openContactContextMenu = (e, studentId) => {
+        e.preventDefault();
+        e.stopPropagation();
+
+        // Right-clicking a contact outside the current selection selects only that contact
+        if (!selectedStudents.includes(studentId)) {
+            setSelectedStudents([studentId]);
+            setLastSelectedStudentId(studentId);
+        }
+
+        const MENU_WIDTH = 200;
+        const MENU_HEIGHT = 116;
+        setContextMenu({
+            studentId,
+            x: Math.max(8, Math.min(e.clientX, window.innerWidth - MENU_WIDTH - 8)),
+            y: Math.max(8, Math.min(e.clientY, window.innerHeight - MENU_HEIGHT - 8))
+        });
     };
 
     const toggleStudentHistory = (studentId) => {
@@ -977,18 +1005,67 @@ export default function App() {
         closeModals();
     };
 
-    const deleteStudent = (id) => {
-        showConfirm("Delete Contact", "Are you sure you want to delete this contact?", () => {
+    // Removes one or many contacts (ids) after an explicit confirmation
+    const deleteStudents = (ids) => {
+        const targets = Array.from(new Set(ids || [])).filter(Boolean);
+        if (targets.length === 0) return;
+
+        const isSingle = targets.length === 1;
+        const title = isSingle ? "Delete Contact" : `Delete ${targets.length} Contacts`;
+        const message = isSingle
+            ? "Are you sure you want to delete this contact? This cannot be undone."
+            : `Are you sure you want to delete these ${targets.length} contacts? This cannot be undone.`;
+
+        showConfirm(title, message, () => {
             setData(prev => ({
                 ...prev,
-                students: prev.students.filter(s => s.id !== id)
+                students: prev.students.filter(s => !targets.includes(s.id))
             }));
-            setSelectedStudents(prev => prev.filter(sId => sId !== id));
-            setExpandedStudents(prev => prev.filter(sId => sId !== id));
-            setExpandedEmailContacts(prev => prev.filter(sId => sId !== id));
+            setSelectedStudents(prev => prev.filter(sId => !targets.includes(sId)));
+            setExpandedStudents(prev => prev.filter(sId => !targets.includes(sId)));
+            setExpandedEmailContacts(prev => prev.filter(sId => !targets.includes(sId)));
+            setLastSelectedStudentId(prev => (prev && targets.includes(prev)) ? null : prev);
+            setContextMenu(null);
             closeModals();
         });
     };
+
+    const deleteStudent = (id) => deleteStudents([id]);
+
+    // Close the contact context menu on outside click, scroll, resize, or Escape
+    useEffect(() => {
+        if (!contextMenu) return;
+        const close = () => setContextMenu(null);
+        const onKeyDown = (e) => { if (e.key === 'Escape') setContextMenu(null); };
+        window.addEventListener('click', close);
+        window.addEventListener('contextmenu', close);
+        window.addEventListener('resize', close);
+        window.addEventListener('scroll', close, true);
+        window.addEventListener('keydown', onKeyDown);
+        return () => {
+            window.removeEventListener('click', close);
+            window.removeEventListener('contextmenu', close);
+            window.removeEventListener('resize', close);
+            window.removeEventListener('scroll', close, true);
+            window.removeEventListener('keydown', onKeyDown);
+        };
+    }, [contextMenu]);
+
+    // Keyboard shortcut: Delete key removes the currently selected contacts
+    useEffect(() => {
+        const onKeyDown = (e) => {
+            if (e.key !== 'Delete' && e.key !== 'Backspace') return;
+            const el = e.target;
+            const tag = el?.tagName;
+            if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el?.isContentEditable) return;
+            if (customDialog.isOpen || Object.values(modals).some(Boolean)) return;
+            if (!activeClassId || selectedStudents.length === 0) return;
+            e.preventDefault();
+            deleteStudents(selectedStudents);
+        };
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+    }, [selectedStudents, activeClassId, customDialog.isOpen, modals]);
 
     const deleteClass = (id) => {
         showConfirm("Delete Group", "Are you sure you want to delete this group? All contacts within it will be lost.", () => {
@@ -1994,6 +2071,17 @@ export default function App() {
         btnDanger: isDark ? 'bg-[#ff6188]/20 hover:bg-[#ff6188]/30 text-[#ff6188] border border-[#ff6188]/30' : 'bg-[#e0466a]/10 hover:bg-[#e0466a]/20 text-[#e0466a] border border-[#e0466a]/20'
     };
 
+    // Contact context menu: the contact that was right-clicked, and what a "Delete" click removes
+    const contextTargetStudent = contextMenu ? classStudents.find(s => s.id === contextMenu.studentId) : null;
+    const contextMenuTargets = contextMenu
+        ? (contextTargetStudent && selectedStudents.includes(contextTargetStudent.id) && selectedStudents.length > 1
+            ? selectedStudents
+            : [contextMenu.studentId])
+        : [];
+    const contextMenuDeleteLabel = contextMenuTargets.length > 1
+        ? `Delete ${contextMenuTargets.length} Contacts`
+        : 'Delete Contact';
+
     return (
         <div className={`flex h-screen font-sans relative overflow-hidden transition-colors duration-300 ${sidebarOpen ? '' : 'sidebar-closed'} ${themeClasses.appBg}`}>
 
@@ -2346,16 +2434,29 @@ export default function App() {
                                     {allSelected ? 'Deselect All' : 'Select All'}
                                 </button>
                             </div>
-                            <button
-                                onClick={clearHistory}
-                                className={`text-sm px-3 py-1.5 rounded-md flex items-center gap-2 transition-all active:scale-95 ${selectedStudents.length > 0
-                                    ? themeClasses.btnDanger
-                                    : 'text-gray-400 cursor-not-allowed opacity-50 shadow-none border-transparent bg-transparent'
-                                    }`}
-                                disabled={selectedStudents.length === 0}
-                            >
-                                <Trash2 size={16} /> Clear Selected Logs
-                            </button>
+                            <div className="flex gap-2 flex-wrap">
+                                <button
+                                    onClick={() => selectedStudents.length > 0 && deleteStudents(selectedStudents)}
+                                    className={`text-sm px-3 py-1.5 rounded-md flex items-center gap-2 transition-all active:scale-95 ${selectedStudents.length > 0
+                                        ? themeClasses.btnDanger
+                                        : 'text-gray-400 cursor-not-allowed opacity-50 shadow-none border-transparent bg-transparent'
+                                        }`}
+                                    disabled={selectedStudents.length === 0}
+                                    title="Delete every selected contact"
+                                >
+                                    <Trash2 size={16} /> Delete Selected ({selectedStudents.length})
+                                </button>
+                                <button
+                                    onClick={clearHistory}
+                                    className={`text-sm px-3 py-1.5 rounded-md flex items-center gap-2 transition-all active:scale-95 ${selectedStudents.length > 0
+                                        ? themeClasses.btnDanger
+                                        : 'text-gray-400 cursor-not-allowed opacity-50 shadow-none border-transparent bg-transparent'
+                                        }`}
+                                    disabled={selectedStudents.length === 0}
+                                >
+                                    <Trash2 size={16} /> Clear Selected Logs
+                                </button>
+                            </div>
                         </div>
 
                         {/* Responsive scrolling table wrapper */}
@@ -2369,7 +2470,7 @@ export default function App() {
                                         <th className="p-3 w-px whitespace-nowrap">Most Recent Email</th>
                                         <th className="p-3">Message Snippet</th>
                                         <th className="p-3">Notes</th>
-                                        <th className="p-3 w-16 text-center"></th>
+                                        <th className="p-3 w-24 text-center"></th>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-gray-200/10">
@@ -2402,12 +2503,18 @@ export default function App() {
                                                     className={`transition-all duration-200 cursor-pointer select-none ${isSelected ? themeClasses.selectedRowBg : themeClasses.altRowBg}`}
                                                     onClick={(e) => handleStudentClick(e, student.id)}
                                                     onDoubleClick={() => openEditModal('student', student)}
+                                                    onContextMenu={(e) => openContactContextMenu(e, student.id)}
                                                 >
                                                     <td className="p-3 text-center">
                                                         <input
                                                             type="checkbox"
                                                             checked={isSelected}
-                                                            onChange={() => { }} // Controlled via onClick on tr
+                                                            onChange={() => { }} // Controlled via onClick below
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                setLastSelectedStudentId(student.id);
+                                                                toggleStudentSelection(student.id);
+                                                            }}
                                                             className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500 cursor-pointer transition-all active:scale-90"
                                                         />
                                                     </td>
@@ -2473,8 +2580,12 @@ export default function App() {
                                                         {student.notes || <span className="text-gray-300 italic">-</span>}
                                                     </td>
                                                     <td className="p-3 text-center">
-                                                        <button onClick={() => openEditModal('student', student)} className={`p-1.5 rounded-lg border transition-all duration-200 active:scale-95 ${isDark ? 'text-zinc-400 hover:text-[#ff6188] hover:bg-zinc-800 border-zinc-700' : 'text-gray-500 hover:text-[#ff6188] hover:bg-gray-100 border-gray-200'
-                                                            }`}><Edit2 size={16} /></button>
+                                                        <div className="flex items-center justify-center gap-1.5">
+                                                            <button onClick={() => openEditModal('student', student)} title="Edit contact" className={`p-1.5 rounded-lg border transition-all duration-200 active:scale-95 ${isDark ? 'text-zinc-400 hover:text-[#78dce8] hover:bg-zinc-800 border-zinc-700' : 'text-gray-500 hover:text-[#00838f] hover:bg-gray-100 border-gray-200'
+                                                                }`}><Edit2 size={16} /></button>
+                                                            <button onClick={() => deleteStudent(student.id)} title="Delete contact" className={`p-1.5 rounded-lg border transition-all duration-200 active:scale-95 ${isDark ? 'text-zinc-400 hover:text-[#ff6188] hover:bg-zinc-800 border-zinc-700' : 'text-gray-500 hover:text-[#ff6188] hover:bg-gray-100 border-gray-200'
+                                                                }`}><Trash2 size={16} /></button>
+                                                        </div>
                                                     </td>
                                                 </tr>
 
@@ -2828,6 +2939,19 @@ export default function App() {
                         <div className="p-6 space-y-4">
                             <div className="space-y-2">
                                 <div className="flex items-center justify-between">
+                                    <span className="text-sm font-bold text-[#a9dc76]">v1.5</span>
+                                    <span className="text-[10px] text-gray-500 font-mono">2026-09-27</span>
+                                </div>
+                                <ul className="list-disc pl-4 text-xs space-y-1 text-gray-600 dark:text-gray-400">
+                                    <li>Contacts can now be deleted: single delete from the row's trash button, the edit modal, or the right-click menu.</li>
+                                    <li>Added "Delete Selected" for deleting many contacts at once, plus Delete-key support for the current selection.</li>
+                                    <li>Right-click any contact row to open a context menu (Edit / Delete). Right-clicking an unselected contact selects it first; if multiple contacts are selected, the menu deletes all of them.</li>
+                                    <li>Selection now follows standard conventions: click selects a single contact, Ctrl/Cmd+click toggles, Shift+click selects a range, and Ctrl/Cmd+Shift+click extends the selection.</li>
+                                    <li>Every delete asks for confirmation before contacts are removed.</li>
+                                </ul>
+                            </div>
+                            <div className="space-y-2">
+                                <div className="flex items-center justify-between">
                                     <span className="text-sm font-bold text-[#a9dc76]">v1.3</span>
                                     <span className="text-[10px] text-gray-500 font-mono">2026-07-23</span>
                                 </div>
@@ -3123,6 +3247,46 @@ export default function App() {
                 </div>
             )}
 
+
+            {/* --- CONTACT ROW CONTEXT MENU (Right-click) --- */}
+            {contextMenu && (
+                <div
+                    className={`fixed z-[110] min-w-[196px] rounded-xl border shadow-2xl py-1.5 overflow-hidden animate-in fade-in zoom-in-95 duration-100 ${themeClasses.cardBg}`}
+                    style={{ left: contextMenu.x, top: contextMenu.y }}
+                    onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                    onClick={(e) => e.stopPropagation()}
+                >
+                    <div className={`px-3 pt-1.5 pb-2 border-b ${themeClasses.border}`}>
+                        <p className={`text-xs font-extrabold truncate ${themeClasses.textPrimary}`}>{contextTargetStudent?.name || 'Contact'}</p>
+                        <p className={`text-[10px] font-semibold ${themeClasses.textMuted}`}>
+                            {selectedStudents.length > 1 ? `${selectedStudents.length} contacts selected` : '1 contact selected'}
+                        </p>
+                    </div>
+                    <button
+                        type="button"
+                        disabled={!contextTargetStudent}
+                        onClick={() => {
+                            setContextMenu(null);
+                            if (contextTargetStudent) openEditModal('student', contextTargetStudent);
+                        }}
+                        className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm font-semibold text-left transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${isDark ? 'hover:bg-[#4a474a] text-[#fcfaf2]' : 'hover:bg-[#f2ece0] text-[#2d2a2e]'}`}
+                    >
+                        <Edit2 size={14} className="shrink-0" /> Edit Contact
+                    </button>
+                    <div className={`my-1 border-t ${themeClasses.border}`} />
+                    <button
+                        type="button"
+                        onClick={() => {
+                            const targets = contextMenuTargets;
+                            setContextMenu(null);
+                            deleteStudents(targets);
+                        }}
+                        className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm font-bold text-left transition-colors ${isDark ? 'hover:bg-[#ff6188]/20 text-[#ff6188]' : 'hover:bg-[#e0466a]/10 text-[#e0466a]'}`}
+                    >
+                        <Trash2 size={14} className="shrink-0" /> {contextMenuDeleteLabel}
+                    </button>
+                </div>
+            )}
 
             {/* --- CUSTOM DIALOG OVERLAY (Replaces window.confirm & window.alert) --- */}
             {customDialog.isOpen && (
