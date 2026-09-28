@@ -6,6 +6,7 @@ import {
     ChevronDown, ChevronUp, Clock, History, Trash, Printer, FileSpreadsheet,
     Sun, Moon, Sparkles, Coffee, AlertTriangle, CheckCircle2, Cloud, CloudOff
 } from 'lucide-react';
+import { getSyncHandle, setSyncHandle, clearSyncHandle, putAutoBackup } from './syncStorage.js';
 
 // --- Utility Functions ---
 const generateId = () => crypto.randomUUID();
@@ -233,6 +234,19 @@ function syncNeedsPush(currentData = null) {
     return false;
 }
 
+// Turn low-level failures (mostly IndexedDB DOMExceptions) into something the
+// user can act on instead of a truncated browser message.
+function describeSyncError(error) {
+    const message = (error && error.message) || String(error);
+    if (message.includes("IDBDatabase") || message.includes("object store") || (error && error.name === "VersionError")) {
+        return "the app's browser storage is out of date — reload the app and try again. If that keeps happening, clear this site's data and import your backup once more.";
+    }
+    if (error && error.name === "AbortError") {
+        return "the operation was cancelled.";
+    }
+    return message;
+}
+
 // --- Fingerprinting & Difference Engine ---
 function generateDataFingerprint(dataObj = null) {
     const f = dataObj ? (dataObj.folders || []) : [];
@@ -325,73 +339,12 @@ function compareFingerprints(localFP, fileFP) {
 }
 
 // --- IndexedDB Sync Handle & Auto-Backup Storage ---
-const SYNC_DB_NAME = 'BatchEmailerSyncDB';
-const SYNC_DB_STORE = 'sync_handles';
-const SYNC_HANDLE_KEY = 'activeSyncHandle';
-const AUTO_BACKUP_STORE = 'auto_backups';
-
-function openSyncDB() {
-    return new Promise((resolve, reject) => {
-        if (!window.indexedDB) {
-            reject(new Error("IndexedDB not supported"));
-            return;
-        }
-        const req = indexedDB.open(SYNC_DB_NAME, 1);
-        req.onupgradeneeded = () => {
-            const db = req.result;
-            if (!db.objectStoreNames.contains(SYNC_DB_STORE)) {
-                db.createObjectStore(SYNC_DB_STORE);
-            }
-            if (!db.objectStoreNames.contains(AUTO_BACKUP_STORE)) {
-                db.createObjectStore(AUTO_BACKUP_STORE, { keyPath: 'id' });
-            }
-        };
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () => reject(req.error);
-    });
-}
-
-async function getSyncHandle() {
-    try {
-        const db = await openSyncDB();
-        return await new Promise((resolve, reject) => {
-            const tx = db.transaction(SYNC_DB_STORE, "readonly");
-            const req = tx.objectStore(SYNC_DB_STORE).get(SYNC_HANDLE_KEY);
-            req.onsuccess = () => resolve(req.result || null);
-            req.onerror = () => reject(tx.error);
-        });
-    } catch {
-        return null;
-    }
-}
-
-async function setSyncHandle(handle) {
-    const db = await openSyncDB();
-    return new Promise((resolve, reject) => {
-        const tx = db.transaction(SYNC_DB_STORE, "readwrite");
-        tx.objectStore(SYNC_DB_STORE).put(handle, SYNC_HANDLE_KEY);
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-    });
-}
-
-async function clearSyncHandle() {
-    const db = await openSyncDB();
-    return new Promise((resolve, reject) => {
-        const tx = db.transaction(SYNC_DB_STORE, "readwrite");
-        tx.objectStore(SYNC_DB_STORE).delete(SYNC_HANDLE_KEY);
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-    });
-}
-
+// Opening the database, migrating older store layouts and reading/writing the
+// stored file handle all live in ./syncStorage.js.
 const saveAutoBackupToIDB = async (dataToSave) => {
     try {
-        const db = await openSyncDB();
         const encrypted = await encryptExport(dataToSave);
-        const tx = db.transaction(AUTO_BACKUP_STORE, 'readwrite');
-        const store = tx.objectStore(AUTO_BACKUP_STORE);
-        store.put({
+        await putAutoBackup({
             id: 'latest_auto_backup',
             timestamp: new Date().toISOString(),
             envelope: JSON.parse(encrypted)
@@ -1635,6 +1588,24 @@ export default function App() {
             const meta = getSyncMeta();
             const hadFileBefore = !!meta.fileName;
 
+            // Pick a file and connect it as the sync file. Failures here (for
+            // example an IndexedDB problem) used to escape as a raw DOMException.
+            const connectAndSync = async (promptMessage, promptType = "info") => {
+                if (promptMessage) showSyncToast(promptMessage, promptType);
+                const newHandle = await pickSyncFile();
+                if (!newHandle) return;
+                try {
+                    await setSyncHandle(newHandle);
+                    setSyncFileName(newHandle.name);
+                    setSyncMeta({ fileName: newHandle.name });
+                    await syncWithHandle(newHandle, true);
+                } catch (e) {
+                    console.error("[Sync] could not connect to the chosen file:", e);
+                    showSyncToast(`Couldn't sync with "${newHandle.name}" — ` + describeSyncError(e), "error");
+                    setSyncStatus('error');
+                }
+            };
+
             if (hasFSA) {
                 let handle = await getSyncHandle();
                 if (handle) {
@@ -1645,38 +1616,22 @@ export default function App() {
                         const isHandleError = e.name === "NotFoundError" || e.name === "NotReadableError"
                             || e.name === "NotAllowedError" || e.name === "SecurityError";
                         if (isHandleError) {
-                            await clearSyncHandle();
-                            showSyncToast(`Connection to "${meta.fileName}" lost — please choose the file again.`, "warn");
-                            const newHandle = await pickSyncFile();
-                            if (newHandle) {
-                                await setSyncHandle(newHandle);
-                                setSyncFileName(newHandle.name);
-                                setSyncMeta({ fileName: newHandle.name });
-                                await syncWithHandle(newHandle, true);
+                            try {
+                                await clearSyncHandle();
+                            } catch (clearError) {
+                                console.warn("[Sync] could not clear the stored handle:", clearError);
                             }
+                            await connectAndSync(`Connection to "${meta.fileName}" lost — please choose the file again.`, "warn");
                         } else {
-                            showSyncToast("Sync failed: " + (e.message || "unknown error"), "error");
+                            showSyncToast("Sync failed: " + describeSyncError(e), "error");
                             setSyncStatus('error');
                         }
                     }
                 } else if (hadFileBefore) {
-                    showSyncToast(`Please choose "${meta.fileName}" to reconnect.`, "info");
-                    const newHandle = await pickSyncFile();
-                    if (newHandle) {
-                        await setSyncHandle(newHandle);
-                        setSyncFileName(newHandle.name);
-                        setSyncMeta({ fileName: newHandle.name });
-                        await syncWithHandle(newHandle, true);
-                    }
+                    await connectAndSync(`Please choose "${meta.fileName}" to reconnect.`);
                 } else {
                     // First time setup
-                    const newHandle = await pickSyncFile();
-                    if (newHandle) {
-                        await setSyncHandle(newHandle);
-                        setSyncFileName(newHandle.name);
-                        setSyncMeta({ fileName: newHandle.name });
-                        await syncWithHandle(newHandle, true);
-                    }
+                    await connectAndSync();
                 }
             } else {
                 // Non-FSA fallback (Safari / Firefox / Mobile)
@@ -1687,7 +1642,7 @@ export default function App() {
             }
         } catch (e) {
             console.error("[Sync] autoSync unexpected error:", e);
-            showSyncToast("Sync error: " + (e.message || e), "error");
+            showSyncToast("Sync error: " + describeSyncError(e), "error");
             setSyncStatus('error');
         } finally {
             const meta = getSyncMeta();
@@ -1797,10 +1752,16 @@ export default function App() {
         if (hasFSA) {
             const handle = await pickSyncFile();
             if (!handle) return;
-            await setSyncHandle(handle);
-            setSyncFileName(handle.name);
-            setSyncMeta({ fileName: handle.name });
-            await syncWithHandle(handle, true);
+            try {
+                await setSyncHandle(handle);
+                setSyncFileName(handle.name);
+                setSyncMeta({ fileName: handle.name });
+                await syncWithHandle(handle, true);
+            } catch (e) {
+                console.error("[Sync] could not switch sync file:", e);
+                showSyncToast(`Couldn't sync with "${handle.name}" — ` + describeSyncError(e), "error");
+                setSyncStatus('error');
+            }
         } else {
             showConfirm("Change Sync File", "Choose a new sync file on your device?", () => {
                 localStorage.removeItem(SYNC_META_KEY);
@@ -1812,7 +1773,14 @@ export default function App() {
 
     const handleDisconnectSync = async () => {
         showConfirm("Disconnect Sync", "Disconnecting will stop syncing with this file. Your local data will remain unchanged.", async () => {
-            await clearSyncHandle();
+            try {
+                await clearSyncHandle();
+            } catch (e) {
+                console.error("[Sync] could not clear the stored handle:", e);
+                showSyncToast("Couldn't disconnect the sync file — " + describeSyncError(e), "error");
+                setSyncStatus('error');
+                return;
+            }
             setSyncMeta({
                 fileName: null,
                 baseRevision: null,
