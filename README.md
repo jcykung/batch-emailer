@@ -51,10 +51,10 @@ Organize contacts into folders and groups, compose messages, and send batch emai
 <td width="50%">
 
 ### 📊 Track & Export
-- **Communication History** — Every sent email is timestamped and logged per contact
+- **Communication History** — Every sent email is timestamped and logged per contact, including the subject line and full message body
 - **PDF Reports** — Export a formatted group report with full email history as a PDF via `jsPDF`
 - **Print View** — Browser-native print layout optimized for clean, compact output
-- **JSON Backup** — Export / import your entire dataset; supports both replace and append modes
+- **JSON Backup** — Export / import your entire dataset; supports both replace and merge modes, and every file is verified after writing so folders, groups, contacts, notes, **email messages** and settings are all provably present
 
 </td>
 </tr>
@@ -98,6 +98,14 @@ npm run build
 npm run preview   # Preview the production build locally
 ```
 
+### Verify the Backup Path
+
+```bash
+npm run verify-backup
+```
+
+Proves that backup/sync files really contain everything: it round-trips a realistic dataset through encrypt → write → read → verify, and confirms that missing contacts, missing **email messages** or missing settings make verification fail loudly. Run it after touching anything in the backup/sync code.
+
 ---
 
 ## 🗂️ Project Structure
@@ -111,7 +119,8 @@ batch-emailer/
 │   ├── favicon.svg
 │   └── favicon-*.png
 ├── scripts/
-│   └── generate_favicons.py   # Favicon generation utility
+│   ├── generate_favicons.py   # Favicon generation utility
+│   └── verify_backup_integrity.mjs  # Round-trip test for backup/sync completeness
 ├── src/
 │   ├── main.jsx          # React root mount
 │   ├── App.jsx           # Entire application (single-file SPA)

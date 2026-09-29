@@ -144,8 +144,8 @@ function normalizeImportedData(importedData) {
             const history = [];
             if (updatedStudent.message || updatedStudent.timestamp) {
                 history.push({
-                    id: generateId(),
-                    timestamp: updatedStudent.timestamp || new Date().toISOString(),
+                    id: legacyHistoryLogId(updatedStudent.id, updatedStudent.timestamp, updatedStudent.message),
+                    timestamp: updatedStudent.timestamp || '',
                     message: updatedStudent.message || ''
                 });
             }
@@ -155,6 +155,185 @@ function normalizeImportedData(importedData) {
     });
 
     return { folders, classes, students };
+}
+
+// Deterministic id for log entries synthesized from a contact's legacy
+// top-level message/timestamp fields. Random ids here would make normalizing
+// the same file twice produce different content hashes — which sync would read
+// as two different datasets — and would break backup verification.
+function legacyHistoryLogId(studentId, timestamp, message) {
+    const stamp = String(timestamp || '').replace(/[^0-9]/g, '');
+    return `log_${studentId || 'unknown'}_${stamp || '0'}_${String(message || '').length}`;
+}
+
+// --- Backup Completeness Helpers ---
+// Everything the user can type or set up lives in `data` (folders, groups,
+// contacts, notes, email logs) plus these extra localStorage preferences that
+// are deliberately NOT part of `data`:
+//   - theme (a user preference, restorable from a backup)
+// Device/sync bookkeeping (device id, sync meta, file handles) is device
+// specific and must never travel inside a backup.
+const SETTINGS_KEYS = { theme: 'batch-emailer-theme' };
+
+function readBackupSettings(source = null) {
+    let theme;
+    try {
+        theme = source && source.settings && typeof source.settings === 'object'
+            ? source.settings.theme
+            : localStorage.getItem(SETTINGS_KEYS.theme);
+    } catch {
+        theme = null;
+    }
+    return { theme: theme === 'light' ? 'light' : 'dark' };
+}
+
+function countEmailMessages(source) {
+    const students = (source && source.students) || [];
+    return students.reduce((total, s) => {
+        if (!s) return total;
+        // Counts the stored log entries; falls back to the legacy top-level
+        // message for never-migrated contacts without double counting.
+        if (Array.isArray(s.emailHistory)) {
+            return total + (s.emailHistory.length || (s.message ? 1 : 0));
+        }
+        return total + (s.message || s.timestamp ? 1 : 0);
+    }, 0);
+}
+
+// Folder/group/contact/message counts — shown to the user and used to prove a
+// written backup file contains the same amount of data as the app.
+function getDataSummary(source) {
+    const src = source || {};
+    return {
+        folderCount: (src.folders || []).length,
+        classCount: (src.classes || []).length,
+        studentCount: (src.students || []).length,
+        messageCount: countEmailMessages(src)
+    };
+}
+
+function describeDataSummary(source) {
+    const s = getDataSummary(source);
+    return `${s.folderCount} folder${s.folderCount === 1 ? '' : 's'}, ` +
+        `${s.classCount} group${s.classCount === 1 ? '' : 's'}, ` +
+        `${s.studentCount} contact${s.studentCount === 1 ? '' : 's'} and ` +
+        `${s.messageCount} email message${s.messageCount === 1 ? '' : 's'}`;
+}
+
+// Merges a contact from a backup into an existing local contact with the same
+// id. Local values win, empty local values are filled in from the file, and the
+// email histories are unioned (de-duplicated, newest first) so an import can
+// never silently discard messages that only exist in the file.
+function mergeContactRecords(local, incoming) {
+    const localHistory = Array.isArray(local.emailHistory) ? local.emailHistory : [];
+    const incomingHistory = Array.isArray(incoming.emailHistory) ? incoming.emailHistory : [];
+
+    const seen = new Set();
+    const mergedHistory = [];
+    [...localHistory, ...incomingHistory].forEach(log => {
+        if (!log || typeof log !== 'object') return;
+        const key = log.id || `${log.timestamp || ''}|${log.message || ''}|${log.subject || ''}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        mergedHistory.push(log);
+    });
+    mergedHistory.sort((a, b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0));
+
+    const newest = mergedHistory[0] || null;
+    const emails = [...(local.emails || [])];
+    (incoming.emails || []).forEach(email => {
+        if (email && !emails.includes(email)) emails.push(email);
+    });
+
+    return {
+        ...incoming,
+        ...local,
+        name: local.name || incoming.name || '',
+        notes: local.notes || incoming.notes || '',
+        classId: local.classId || incoming.classId || null,
+        emails: emails.length > 0 ? emails : [''],
+        emailHistory: mergedHistory,
+        timestamp: newest ? (newest.timestamp || '') : (local.timestamp || ''),
+        message: newest ? (newest.message || '') : (local.message || '')
+    };
+}
+
+// Builds the exact file body shared by backups, sync writes and auto-pushes.
+// Everything the app stores travels in here, unmodified.
+async function buildBackupPayload(activeData, revision) {
+    const canonicalData = getCanonicalData(activeData);
+    const contentHash = await computeDataHash(canonicalData);
+    return {
+        version: 2,
+        exportedAt: new Date().toISOString(),
+        syncMeta: {
+            schemaVersion: 2,
+            revision: revision,
+            timestamp: Date.now(),
+            deviceId: getDeviceId(),
+            deviceName: getDeviceName(),
+            contentHash: contentHash,
+            summary: getDataSummary(activeData)
+        },
+        // Raw objects, untouched: every field the app stores travels into the
+        // file — including each contact's full emailHistory (the messages).
+        folders: activeData.folders || [],
+        classes: activeData.classes || [],
+        students: activeData.students || [],
+        // Settings are carried in the file (restored explicitly via
+        // "Replace All Data") but are deliberately kept out of the content
+        // hash so a theme change alone can never trigger a sync conflict.
+        settings: readBackupSettings()
+    };
+}
+
+// Exported for scripts/verify_backup_integrity.mjs so the backup path can be
+// proven round-trip safe without booting the whole app.
+export {
+    encryptExport, parseExport, getCanonicalData, normalizeImportedData,
+    buildBackupPayload, verifyBackupRoundTrip, getDataSummary,
+    describeDataSummary, countEmailMessages, mergeContactRecords, readBackupSettings
+};
+
+// Decrypts a file we just wrote and proves it still holds every folder, group,
+// contact and email message before we let the write succeed. Fails loudly
+// instead of silently producing an incomplete backup/sync file.
+async function verifyBackupRoundTrip(jsonStr, sourceData, sourceSettings) {
+    let roundTrip;
+    try {
+        roundTrip = await parseExport(jsonStr);
+    } catch (err) {
+        throw new Error("Backup verification failed — the written file could not be read back (" + (err.message || err) + ").");
+    }
+    if (!roundTrip || typeof roundTrip !== 'object') {
+        throw new Error("Backup verification failed — the written file could not be read back.");
+    }
+
+    const expected = getDataSummary(sourceData);
+    const actual = getDataSummary(roundTrip);
+    const mismatches = Object.keys(expected).filter(key => expected[key] !== actual[key]);
+    if (mismatches.length > 0) {
+        throw new Error("Backup verification failed — " + mismatches
+            .map(key => `${key}: ${expected[key]} in your data vs ${actual[key]} in the file`)
+            .join(", ") + ".");
+    }
+
+    const sourceCanonical = await computeDataHash(getCanonicalData(normalizeImportedData(sourceData)));
+    const fileCanonical = await computeDataHash(getCanonicalData(normalizeImportedData(roundTrip)));
+    if (sourceCanonical !== fileCanonical) {
+        throw new Error("Backup verification failed — the contents of the written file differ from your data.");
+    }
+
+    // This is a file we just wrote, so the settings block must be in it — no
+    // falling back to the live browser preferences the way legacy files do.
+    if (!roundTrip.settings || typeof roundTrip.settings !== 'object') {
+        throw new Error("Backup verification failed — your settings were missing from the file.");
+    }
+    if (JSON.stringify(readBackupSettings(roundTrip)) !== JSON.stringify(sourceSettings || readBackupSettings())) {
+        throw new Error("Backup verification failed — your settings were not preserved in the file.");
+    }
+
+    return actual;
 }
 
 function computeDataHashSync(canonicalData) {
@@ -355,6 +534,9 @@ const saveAutoBackupToIDB = async (dataToSave) => {
 };
 
 // --- Save File Helper with File System Access API & Fallback ---
+// Returns the FileSystemFileHandle on success, 'downloaded' when the browser
+// fell back to a regular download, or 'cancelled' if the user aborted the
+// save dialog — so callers never report a backup that was never written.
 async function saveFileAs(content, defaultFilename, mimeType = "application/json") {
     if (window.showSaveFilePicker) {
         try {
@@ -368,7 +550,7 @@ async function saveFileAs(content, defaultFilename, mimeType = "application/json
             await writable.close();
             return handle;
         } catch (e) {
-            if (e.name === "AbortError") return null;
+            if (e.name === "AbortError") return 'cancelled';
         }
     }
     // Fallback (Firefox, Safari, mobile)
@@ -382,7 +564,7 @@ async function saveFileAs(content, defaultFilename, mimeType = "application/json
     a.click();
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    return null;
+    return 'downloaded';
 }
 
 // ---- File System Access Helpers (Chrome/Edge/Arc) ----
@@ -465,7 +647,9 @@ const parseCSV = (text) => {
 };
 
 // --- Generic, Robust Custom Local Storage Hook ---
-function useLocalStorage(key, initialValue) {
+// `onStorageError` (optional) is called if the browser refuses the write —
+// without it a full disk silently throws data (including email messages) away.
+function useLocalStorage(key, initialValue, onStorageError) {
     const [storedValue, setStoredValue] = useState(() => {
         try {
             const item = window.localStorage.getItem(key);
@@ -482,11 +666,18 @@ function useLocalStorage(key, initialValue) {
         }
     });
 
+    // Keep the latest handler in a ref so the save effect stays stable.
+    const errorHandlerRef = useRef(null);
+    useEffect(() => {
+        errorHandlerRef.current = onStorageError || null;
+    });
+
     useEffect(() => {
         try {
             window.localStorage.setItem(key, JSON.stringify(storedValue));
         } catch (error) {
-            console.warn(error);
+            console.error(`[Storage] Could not save "${key}":`, error);
+            if (errorHandlerRef.current) errorHandlerRef.current(error);
         }
     }, [key, storedValue]);
 
@@ -496,11 +687,15 @@ function useLocalStorage(key, initialValue) {
 // --- Main Application Component ---
 export default function App() {
     // State
+    // Set when the browser refuses to persist data (almost always "storage
+    // full"). Declared first so the storage hooks below can report into it.
+    const [storageError, setStorageError] = useState(null);
+
     const [data, setData] = useLocalStorage('batch-emailer-data', {
         folders: [],
         classes: [], // Internally classes, represented as "Groups" in UI
         students: [] // Internally students, represented as "Contacts" in UI
-    });
+    }, setStorageError);
 
     const [activeFolderId, setActiveFolderId] = useState(null);
     const [activeClassId, setActiveClassId] = useState(null);
@@ -509,7 +704,7 @@ export default function App() {
     const [sidebarOpen, setSidebarOpen] = useState(true);
     const [expandedStudents, setExpandedStudents] = useState([]);
     const [expandedEmailContacts, setExpandedEmailContacts] = useState([]);
-    const [theme, setTheme] = useLocalStorage('batch-emailer-theme', 'dark'); // Defaulting to dark
+    const [theme, setTheme] = useLocalStorage('batch-emailer-theme', 'dark', setStorageError); // Defaulting to dark
 
     // Modals
     const [modals, setModals] = useState({
@@ -531,6 +726,27 @@ export default function App() {
         isConfirm: false,
         onConfirm: null
     });
+
+    // Surface persistence failures loudly: a rejected localStorage write means
+    // the latest edits (email messages included) only exist until reload.
+    useEffect(() => {
+        if (!storageError) return;
+        const raw = storageError.message || String(storageError);
+        const isQuota = storageError.name === 'QuotaExceededError'
+            || storageError.name === 'NS_ERROR_DOM_QUOTA_REACHED'
+            || storageError.name === 'QUOTA_EXCEEDED_ERR'
+            || /quota|storage|exceed/i.test(raw);
+        setCustomDialog({
+            isOpen: true,
+            title: isQuota ? 'Browser Storage Is Full' : 'Changes Not Saved',
+            message: isQuota
+                ? "Your browser is out of storage space, so your latest changes (including email messages) were NOT saved and will be lost on reload. Download a backup now to protect your data, then free up space by clearing other sites' data."
+                : "Your latest changes could not be saved to browser storage: " + raw,
+            isConfirm: false,
+            onConfirm: null
+        });
+        setStorageError(null);
+    }, [storageError]);
 
     // Edit states
     const [editingItem, setEditingItem] = useState(null);
@@ -566,8 +782,8 @@ export default function App() {
                     const history = [];
                     if (updatedStudent.message || updatedStudent.timestamp) {
                         history.push({
-                            id: generateId(),
-                            timestamp: updatedStudent.timestamp || new Date().toISOString(),
+                            id: legacyHistoryLogId(updatedStudent.id, updatedStudent.timestamp, updatedStudent.message),
+                            timestamp: updatedStudent.timestamp || '',
                             message: updatedStudent.message || ''
                         });
                     }
@@ -1408,34 +1624,23 @@ export default function App() {
 
     const buildSyncJSON = async (revision = 1, currentData = null) => {
         const activeData = currentData || data;
-        const canonicalData = getCanonicalData(activeData);
-        const contentHash = await computeDataHash(canonicalData);
         const meta = getSyncMeta();
         const rev = Number.isFinite(revision) ? revision : ((meta.baseRevision || 0) + 1);
 
-        const payload = {
-            version: 2,
-            exportedAt: new Date().toISOString(),
-            syncMeta: {
-                schemaVersion: 2,
-                revision: rev,
-                timestamp: Date.now(),
-                deviceId: getDeviceId(),
-                deviceName: getDeviceName(),
-                contentHash: contentHash,
-                summary: {
-                    folderCount: (activeData.folders || []).length,
-                    classCount: (activeData.classes || []).length,
-                    studentCount: (activeData.students || []).length
-                }
-            },
-            folders: activeData.folders || [],
-            classes: activeData.classes || [],
-            students: activeData.students || []
-        };
-
+        const payload = await buildBackupPayload(activeData, rev);
         const jsonStr = await encryptExport(payload);
-        return { jsonStr, payload, canonicalData, contentHash, revision: rev };
+
+        // Never report success for a file we cannot prove is complete.
+        const summary = await verifyBackupRoundTrip(jsonStr, activeData, payload.settings);
+
+        return {
+            jsonStr,
+            payload,
+            canonicalData: getCanonicalData(activeData),
+            contentHash: payload.syncMeta.contentHash,
+            revision: rev,
+            summary
+        };
     };
 
     const pushToHandle = async (handle, revision, currentData = null) => {
@@ -1769,7 +1974,12 @@ export default function App() {
             }
         }
 
-        await saveFileAs(jsonStr, safeName, "application/json");
+        const result = await saveFileAs(jsonStr, safeName, "application/json");
+        if (result === 'cancelled') {
+            showSyncToast("Sync cancelled — nothing was written to disk.", "info");
+            setSyncStatus(syncNeedsPush(data) ? 'local-changes' : 'idle');
+            return;
+        }
         const syncedAt = Date.now();
         const fastHash = computeDataHashSync(canonicalData);
         setSyncMeta({
@@ -1920,6 +2130,7 @@ export default function App() {
             const { jsonStr } = await buildSyncJSON(revision, data);
             const dateStr = new Date().toISOString().split('T')[0];
             const filename = `batch_emailer_backup_${dateStr}.json`;
+            const contents = `This backup contains everything: ${describeDataSummary(data)}.`;
 
             // Mobile Native Web Share API
             if (navigator.share && /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent)) {
@@ -1928,6 +2139,7 @@ export default function App() {
                     const file = new File([blob], filename, { type: "application/json" });
                     if (navigator.canShare && navigator.canShare({ files: [file] })) {
                         await navigator.share({ files: [file] });
+                        showAlert("Backup Shared", `${filename} was shared. ${contents}`);
                         return;
                     }
                 } catch {
@@ -1935,7 +2147,9 @@ export default function App() {
                 }
             }
 
-            await saveFileAs(jsonStr, filename, "application/json");
+            const result = await saveFileAs(jsonStr, filename, "application/json");
+            if (result === 'cancelled') return;
+            showAlert("Backup Saved", `${filename} was verified after writing. ${contents}`);
         } catch (err) {
             console.error("Backup export error:", err);
             showAlert("Export Failed", "Could not create backup file: " + (err.message || err));
@@ -1966,6 +2180,7 @@ export default function App() {
             setPendingRestoreData({
                 normalized,
                 raw: parsed,
+                settings: readBackupSettings(parsed),
                 fileName: file.name
             });
             setShowRestoreChoiceModal(true);
@@ -1977,13 +2192,16 @@ export default function App() {
 
     const handleRestoreReplaceAll = async () => {
         if (!pendingRestoreData) return;
-        const { normalized, raw, fileName } = pendingRestoreData;
+        const { normalized, raw, settings, fileName } = pendingRestoreData;
         const canonical = getCanonicalData(normalized);
         const hash = await computeDataHash(canonical);
         const fastHash = computeDataHashSync(canonical);
         const fileRev = Number.isFinite(raw.syncMeta?.revision) ? raw.syncMeta.revision : 1;
 
         setData(normalized);
+        if (settings && (settings.theme === 'light' || settings.theme === 'dark')) {
+            setTheme(settings.theme);
+        }
         setActiveFolderId(null);
         setActiveClassId(null);
 
@@ -2014,20 +2232,46 @@ export default function App() {
 
         const newFolders = normalized.folders.filter(f => !existingFolderIds.has(f.id));
         const newClasses = normalized.classes.filter(c => !existingClassIds.has(c.id));
-        const newStudents = normalized.students.filter(s => !existingStudentIds.has(s.id));
+        const incomingStudents = normalized.students.filter(s => !existingStudentIds.has(s.id));
 
-        if (newFolders.length === 0 && newClasses.length === 0 && newStudents.length === 0) {
+        // Existing contacts keep their identity but absorb anything the backup
+        // has that they don't — especially extra email messages.
+        let mergedContacts = 0;
+        let addedMessages = 0;
+        const snapshot = (s) => JSON.stringify({
+            name: s.name || '',
+            notes: s.notes || '',
+            classId: s.classId || null,
+            emails: [...(s.emails || [])].sort(),
+            history: [...(s.emailHistory || [])]
+                .sort((a, b) => String(a.id || '').localeCompare(String(b.id || '')))
+        });
+        const localStudents = data.students.map(local => {
+            const incoming = normalized.students.find(s => s.id === local.id);
+            if (!incoming) return local;
+            const merged = mergeContactRecords(local, incoming);
+            if (snapshot(merged) !== snapshot(local)) mergedContacts += 1;
+            const before = Array.isArray(local.emailHistory) ? local.emailHistory.length : 0;
+            const after = Array.isArray(merged.emailHistory) ? merged.emailHistory.length : 0;
+            if (after > before) addedMessages += after - before;
+            return merged;
+        });
+
+        const nothingNew = newFolders.length === 0 && newClasses.length === 0
+            && incomingStudents.length === 0 && mergedContacts === 0;
+
+        if (nothingNew) {
             setShowRestoreChoiceModal(false);
             setPendingRestoreData(null);
             closeModals();
-            showAlert("Import Complete", "No new items found. All items in the backup already exist in your local data.");
+            showAlert("Import Complete", "No new items found. Every contact and every email message in the backup already exists in your data.");
             return;
         }
 
         const merged = {
             folders: [...data.folders, ...newFolders],
             classes: [...data.classes, ...newClasses],
-            students: [...data.students, ...newStudents]
+            students: [...localStudents, ...incomingStudents]
         };
 
         setData(merged);
@@ -2036,7 +2280,23 @@ export default function App() {
         setShowRestoreChoiceModal(false);
         setPendingRestoreData(null);
         closeModals();
-        showAlert("Import Complete", `Successfully imported ${newFolders.length} new folders, ${newClasses.length} new groups, and ${newStudents.length} new contacts.`);
+
+        const parts = [];
+        if (incomingStudents.length > 0) {
+            parts.push(`${incomingStudents.length} new contact${incomingStudents.length === 1 ? '' : 's'}`);
+        }
+        if (newFolders.length > 0) {
+            parts.push(`${newFolders.length} folder${newFolders.length === 1 ? '' : 's'}`);
+        }
+        if (newClasses.length > 0) {
+            parts.push(`${newClasses.length} group${newClasses.length === 1 ? '' : 's'}`);
+        }
+        if (addedMessages > 0) {
+            parts.push(`${addedMessages} new email message${addedMessages === 1 ? '' : 's'} merged into ${mergedContacts} existing contact${mergedContacts === 1 ? '' : 's'}`);
+        } else if (mergedContacts > 0) {
+            parts.push(`missing details for ${mergedContacts} existing contact${mergedContacts === 1 ? '' : 's'}`);
+        }
+        showAlert("Import Complete", `Imported ${parts.join(', ')}.`);
     };
 
     // Theme Constants (Monokai Pro inspired)
@@ -2614,6 +2874,11 @@ export default function App() {
                                                                                     </button>
                                                                                 </div>
                                                                             </div>
+                                                                            {log.subject && (
+                                                                                <p className={`text-sm font-bold mb-1 select-all transition-colors duration-300 ${isDark ? 'text-[#78dce8]' : 'text-[#00838f]'}`}>
+                                                                                    Subject: {log.subject}
+                                                                                </p>
+                                                                            )}
                                                                             <p className={`text-sm whitespace-pre-wrap leading-relaxed select-all transition-colors duration-300 ${themeClasses.textPrimary}`}>
                                                                                 {log.message}
                                                                             </p>
@@ -2896,7 +3161,10 @@ export default function App() {
                                     <h4 className="font-semibold text-sm">Download Backup</h4>
                                 </div>
                                 <p className="text-xs text-gray-500 dark:text-gray-400 font-medium">
-                                    Saves an encrypted backup file to your device. Can be used as a sync file — interchangeable formats.
+                                    Saves an encrypted backup file to your device — every folder, group, contact, note, email message and setting is included, and the file is read back and verified before it is saved. Can be used as a sync file — interchangeable formats.
+                                </p>
+                                <p className={`text-[11px] font-bold ${isDark ? 'text-[#a9dc76]' : 'text-[#3f7a1a]'}`}>
+                                    Currently backed up: {describeDataSummary(data)}
                                 </p>
                                 <button onClick={handleExportBackup} className={`w-full py-2.5 rounded-lg text-xs font-bold transition-all active:scale-95 ${themeClasses.btnPrimary}`}>
                                     <span className="flex items-center justify-center gap-2"><Download size={14} /> Download Encrypted Backup</span>
@@ -2910,7 +3178,7 @@ export default function App() {
                                     <h4 className="font-semibold text-sm">Restore from Backup</h4>
                                 </div>
                                 <p className="text-xs text-gray-500 dark:text-gray-400 font-medium">
-                                    Load a backup or sync file. You'll choose whether to replace all data or import only new items.
+                                    Load a backup or sync file. You'll choose whether to replace all data or merge the file into what you have — merging keeps your contacts and adds any folders, groups and email messages you don't have yet.
                                 </p>
                                 <label className={`w-full py-2.5 rounded-lg text-xs font-bold transition-all active:scale-95 cursor-pointer flex items-center justify-center gap-2 ${themeClasses.btnSecondary}`}>
                                     <Upload size={14} /> Select Backup File
@@ -2940,9 +3208,15 @@ export default function App() {
                             <div className="space-y-2">
                                 <div className="flex items-center justify-between">
                                     <span className="text-sm font-bold text-[#a9dc76]">v1.5</span>
-                                    <span className="text-[10px] text-gray-500 font-mono">2026-09-27</span>
+                                    <span className="text-[10px] text-gray-500 font-mono">2026-09-28</span>
                                 </div>
                                 <ul className="list-disc pl-4 text-xs space-y-1 text-gray-600 dark:text-gray-400">
+                                    <li>Backups and sync files are verified before they count as saved: the app decrypts the file it just wrote and confirms the folder, group, contact and email-message counts (and contents) still match — otherwise the save fails loudly instead of writing an incomplete file.</li>
+                                    <li>The restore screen now shows how many <strong>email messages</strong> a file contains, and the confirmation after a download repeats the full contents of the backup.</li>
+                                    <li>"Import New Items Only" now merges: contacts you already have absorb any email messages from the file instead of being skipped.</li>
+                                    <li>Backup files now also carry your settings (theme), which are restored with "Replace All Data".</li>
+                                    <li>Drafted emails store the subject line with each logged message, shown at the top of the contact's history.</li>
+                                    <li>If your browser runs out of storage, the app now warns you instead of silently discarding your latest changes.</li>
                                     <li>Contacts can now be deleted: single delete from the row's trash button, the edit modal, or the right-click menu.</li>
                                     <li>Added "Delete Selected" for deleting many contacts at once, plus Delete-key support for the current selection.</li>
                                     <li>Right-click any contact row to open a context menu (Edit / Delete). Right-clicking an unselected contact selects it first; if multiple contacts are selected, the menu deletes all of them.</li>
@@ -3102,7 +3376,7 @@ export default function App() {
                     selectedStudents={data.students.filter(s => selectedStudents.includes(s.id))}
                     closeModal={closeModals}
                     groupName={currentClass?.name || ''}
-                    onLogMessage={(message) => {
+                    onLogMessage={(message, subject) => {
                         const timestamp = new Date().toISOString();
                         setData(prev => ({
                             ...prev,
@@ -3112,7 +3386,8 @@ export default function App() {
                                     const newLog = {
                                         id: generateId(),
                                         timestamp,
-                                        message
+                                        message,
+                                        subject: subject || ''
                                     };
                                     return {
                                         ...s,
@@ -3215,6 +3490,7 @@ export default function App() {
                                     <p><strong>{pendingRestoreData.normalized.folders.length}</strong> folders</p>
                                     <p><strong>{pendingRestoreData.normalized.classes.length}</strong> groups</p>
                                     <p><strong>{pendingRestoreData.normalized.students.length}</strong> contacts</p>
+                                    <p className={isDark ? 'text-[#a9dc76]' : 'text-[#3f7a1a]'}><strong>{countEmailMessages(pendingRestoreData.normalized)}</strong> email messages</p>
                                 </div>
                             </div>
                         </div>
@@ -3233,7 +3509,7 @@ export default function App() {
                                 className={`w-full py-2.5 rounded-lg text-xs font-bold transition-all active:scale-95 ${themeClasses.btnSecondary}`}
                             >
                                 Import New Items Only
-                                <span className={`block text-[10px] font-normal mt-0.5 ${themeClasses.textMuted}`}>Only adds items not already in your data</span>
+                                <span className={`block text-[10px] font-normal mt-0.5 ${themeClasses.textMuted}`}>Adds new items and merges new email messages into contacts you already have</span>
                             </button>
                             <button
                                 type="button"
@@ -3659,7 +3935,7 @@ function DraftEmailModal({ selectedStudents, closeModal, groupName, onLogMessage
     };
 
     const handleComplete = () => {
-        onLogMessage(message);
+        onLogMessage(message, subject.trim() || defaultSubject);
     };
 
     return (
