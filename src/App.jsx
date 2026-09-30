@@ -985,12 +985,33 @@ export default function App() {
             return;
         }
         if (data) {
-            const now = Date.now();
-            setSyncMeta({ lastLocalChange: now });
             const meta = getSyncMeta();
-            if (meta.fileName) {
-                setSyncStatus('local-changes');
+            // Data that already matches what we last synced is not an edit of
+            // ours — it is the content a sync just wrote into app state (pull,
+            // "keep file" conflict resolution, restore from backup). Treating it
+            // as a local change is what bumped lastLocalChange past
+            // lastSyncedAt and left the Sync button lit after pulling updates.
+            const matchesSyncedBase = !!meta.baseFastHash
+                && computeDataHashSync(getCanonicalData(data)) === meta.baseFastHash;
+
+            if (matchesSyncedBase) {
+                if (meta.fileName) {
+                    // Content is in sync; drop a stale "unsynced edits" flag
+                    // (e.g. the user undid their last change) and report what is
+                    // actually left: nothing, or the file update waiting to be
+                    // pulled.
+                    setSyncStatus(prev => {
+                        if (prev !== 'local-changes') return prev;
+                        return meta.externalUpdateAvailable ? 'external-update' : 'synced';
+                    });
+                }
+            } else {
+                setSyncMeta({ lastLocalChange: Date.now() });
+                if (meta.fileName) {
+                    setSyncStatus('local-changes');
+                }
             }
+
             if (data.folders.length > 0 || data.classes.length > 0 || data.students.length > 0) {
                 saveAutoBackupToIDB(data);
             }
@@ -2038,14 +2059,19 @@ export default function App() {
             showSyncToast("Sync error: " + describeSyncError(e), "error");
             setSyncStatus('error');
         } finally {
-            const meta = getSyncMeta();
-            if (syncNeedsPush(data)) {
-                setSyncStatus('local-changes');
-            } else if (meta.fileName) {
-                setSyncStatus('synced');
-            } else {
-                setSyncStatus('idle');
-            }
+            // Settle the status only when the sync never reported an outcome of
+            // its own (permission denied, picker cancelled, conflict modal…).
+            // A finished pull or push already set its status, and `data` here is
+            // the copy captured when this sync started: after a pull it still
+            // holds the old local content, which disagrees with the base hash
+            // that pull just recorded — that comparison is what kept the button
+            // lit after syncing with another computer.
+            setSyncStatus(prev => {
+                if (prev !== 'syncing') return prev;
+                const meta = getSyncMeta();
+                if (syncNeedsPush(data)) return 'local-changes';
+                return meta.fileName ? 'synced' : 'idle';
+            });
         }
     };
 
@@ -2220,8 +2246,25 @@ export default function App() {
         try {
             const nextRev = Math.max(syncConflictData.fileRevision || 0, getSyncMeta().baseRevision || 0) + 1;
             if (syncConflictData.handle) {
-                await pushToHandle(syncConflictData.handle, nextRev, data);
+                const { syncedAt, contentHash, fastHash } = await pushToHandle(syncConflictData.handle, nextRev, data);
+                // Record the write as the new base, exactly like a normal push.
+                // Without this the app still compares against the pre-conflict
+                // base, so it reports unsynced local changes (and re-conflicts)
+                // after the file was successfully overwritten.
+                setSyncMeta({
+                    fileName: syncConflictData.fileName,
+                    lastSyncedRevision: nextRev,
+                    lastSyncedContentHash: contentHash,
+                    baseRevision: nextRev,
+                    baseContentHash: contentHash,
+                    baseFastHash: fastHash,
+                    lastSyncedAt: syncedAt,
+                    lastLocalChange: syncedAt,
+                    externalUpdateAvailable: false,
+                    externalUpdateAuthor: null
+                });
             } else if (syncConflictData.onPushRequired) {
+                // mobilePushSync() records the new base itself.
                 await syncConflictData.onPushRequired(nextRev);
             }
             setSyncFileName(syncConflictData.fileName);
