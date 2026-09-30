@@ -40,7 +40,8 @@ try {
     const app = await import(pathToFileURL(outFile).href);
     const {
         parseContactsFromText, buildContactRecords, parseCSV,
-        IMPORT_EXAMPLE_PASTE, IMPORT_EXAMPLE_CSV
+        IMPORT_EXAMPLE_PASTE, IMPORT_EXAMPLE_CSV,
+        buildExistingContactIndex, planContactImport
     } = app;
 
     // --- 1. The original bug report: a Google Docs table copied as name line
@@ -188,9 +189,53 @@ try {
         ['sam.lee@example.com', 'parent@example.com']);
     assert.equal(csvExample[2].notes, 'New neighbour');
 
+    // --- 11. "Skip contacts already in …" only looks at the current group --
+    //         Somebody who exists in a different group must NOT be skipped. --
+    const currentGroup = [
+        { name: 'Jamie Rivera', emails: ['jamie.rivera@example.com'] },
+        { name: 'Priya Nair', emails: ['priya.nair@example.com'] }
+    ];
+    const pasted = [
+        { name: 'Jamie Rivera', emails: 'jamie.rivera@example.com' }, // already in this group
+        { name: 'Sam Lee', emails: 'sam.lee@example.com' },           // only in another group
+        { name: 'Alex Rivera', emails: 'alex@example.com' },          // brand new
+        { name: 'Alex Rivera', emails: 'alex@example.com' },          // repeated row
+        { name: '', emails: 'nameless@example.com' }                  // needs a name
+    ];
+
+    const groupIndex = buildExistingContactIndex(currentGroup);
+    const plan = planContactImport(pasted, groupIndex, true);
+    assert.equal(plan.rows.length, 2, "only this group's contacts count as existing");
+    assert.deepEqual(plan.rows.map(r => r.name), ['Sam Lee', 'Alex Rivera'],
+        'a contact that only exists in another group is imported here');
+    assert.equal(plan.skippedExisting, 1, 'the contact already in this group is skipped');
+    assert.equal(plan.duplicates, 1, 'the repeated row is dropped');
+    assert.equal(plan.needsName, 1, 'rows without a name are held back');
+    assert.equal(plan.total, 5);
+
+    const planNoSkip = planContactImport(pasted, groupIndex, false);
+    assert.equal(planNoSkip.rows.length, 3,
+        'unchecking skip keeps the group\'s own contact and every other named row');
+    assert.deepEqual(planNoSkip.rows.map(r => r.name),
+        ['Jamie Rivera', 'Sam Lee', 'Alex Rivera'],
+        'with skip off nothing is dropped as existing');
+    assert.equal(planNoSkip.skippedExisting, 0, 'nothing is skipped when the option is off');
+
+    // The scope is decided by the caller: an index built from some other group
+    // makes this group's own contacts look brand new.
+    const otherGroupIndex = buildExistingContactIndex([
+        { name: 'Chris Vogel', emails: ['chris.vogel@example.net'] }
+    ]);
+    const planElsewhere = planContactImport(pasted, otherGroupIndex, true);
+    assert.equal(planElsewhere.skippedExisting, 0,
+        'contacts outside the indexed group are invisible to the skip check');
+    assert.deepEqual(planElsewhere.rows.map(r => r.name),
+        ['Jamie Rivera', 'Sam Lee', 'Alex Rivera']);
+
     console.log('✓ Contact import checks passed:');
     console.log('  - name/email stacks, tables, CSV, wrapped addresses, headers and dedupe all behave');
     console.log('  - the fake-data examples shown in the Import Contacts dialog parse as documented');
+    console.log('  - skipping is scoped to the current group; other groups are never consulted');
 } finally {
     await rm(outDir, { recursive: true, force: true });
 }

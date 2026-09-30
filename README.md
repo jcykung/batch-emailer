@@ -32,6 +32,7 @@ Organize contacts into folders and groups, compose messages, and send batch emai
 ### 👥 Manage Contacts
 - **Multiple Emails per Contact** — Store unlimited email addresses per person
 - **Bulk Import** — Paste spreadsheet rows, a table copied out of Google Docs/Sheets, comma separated values, or a plain name-above-its-emails list (or upload a `.csv`/`.tsv` file). Header rows are skipped, every address is captured, and each import stops at an **editable review step** so you can fix, delete or skip rows before anything is added
+- **Group-scoped Duplicates** — The review step's **Skip contacts already in "…"** option only compares against the group you're importing into; a person who exists in some other group is never treated as a duplicate here
 - **Standard Selection** — Click to select, `Ctrl`/`Cmd`+click to toggle, `Shift`+click for a range
 - **Delete Contacts** — Remove one contact or many at once from the row's trash button, the right-click menu, the "Delete Selected" button, or the `Delete` key (always with confirmation)
 - **Notes Field** — Attach context to any contact

@@ -294,7 +294,8 @@ export {
     buildBackupPayload, verifyBackupRoundTrip, getDataSummary,
     describeDataSummary, countEmailMessages, mergeContactRecords, readBackupSettings,
     parseContactsFromText, buildContactRecords, parseCSV,
-    IMPORT_EXAMPLE_PASTE, IMPORT_EXAMPLE_CSV
+    IMPORT_EXAMPLE_PASTE, IMPORT_EXAMPLE_CSV,
+    buildExistingContactIndex, planContactImport
 };
 
 // Decrypts a file we just wrote and proves it still holds every folder, group,
@@ -1319,7 +1320,7 @@ export default function App() {
         closeModals();
         if (newStudents.length > 0) {
             const skippedNote = skippedCount > 0
-                ? ` ${skippedCount} row${skippedCount === 1 ? '' : 's'} skipped (already in your contacts or duplicated).`
+                ? ` ${skippedCount} row${skippedCount === 1 ? '' : 's'} skipped (already in this group or duplicated).`
                 : '';
             showAlert(
                 "Import Complete",
@@ -3150,7 +3151,8 @@ export default function App() {
             {modals.bulkAdd && (
                 <ImportContactsModal
                     onImportContacts={handleBulkAdd}
-                    existingStudents={data.students}
+                    existingStudents={classStudents}
+                    groupName={currentClass?.name || ''}
                     closeModal={closeModals}
                     themeClasses={themeClasses}
                 />
@@ -3771,7 +3773,69 @@ const IMPORT_EXAMPLE_CSV = [
     'Sam Lee,sam.lee@example.com,parent@example.com,New neighbour'
 ].join('\n');
 
-function ImportContactsModal({ onImportContacts, existingStudents = [], closeModal, themeClasses }) {
+// A preview row's emails cell ("a@x.com, b@y.com", or already an array).
+const rowEmailList = (row) => String(row?.emails || '')
+    .split(/[\s,;]+/)
+    .map(e => e.trim())
+    .filter(Boolean);
+
+// Lookup of contacts that are already stored, so the preview can flag
+// duplicates. Callers pass only the contacts in the group being imported into:
+// someone who exists in a different group is NOT a duplicate here.
+function buildExistingContactIndex(students) {
+    const index = { names: new Set(), emails: new Set() };
+    (students || []).forEach(s => {
+        const name = String(s?.name || '').trim().toLowerCase();
+        if (name) index.names.add(name);
+        (s?.emails || []).forEach(addr => {
+            const value = String(addr || '').trim().toLowerCase();
+            if (value) index.emails.add(value);
+        });
+    });
+    return index;
+}
+
+// True when this row already exists in the index (name match or email match).
+function contactMatchesIndex(index, name, emails) {
+    const cleanName = String(name || '').trim().toLowerCase();
+    if (cleanName && index.names.has(cleanName)) return true;
+    return (emails || []).some(addr => index.emails.has(String(addr || '').toLowerCase()));
+}
+
+// Works out exactly which preview rows would be imported, before importing.
+// `existingIndex` is scoped to the current group, so "skip contacts I already
+// have" never looks outside the group the contacts are being imported into.
+function planContactImport(previewRows, existingIndex, skipExisting) {
+    const seen = new Set();
+    const rows = [];
+    let skippedExisting = 0;
+    let duplicates = 0;
+    let needsName = 0;
+
+    (previewRows || []).forEach(row => {
+        const name = String(row.name || '').trim();
+        const emails = rowEmailList(row);
+        if (!name) {
+            needsName += 1;
+            return;
+        }
+        const key = `${name.toLowerCase()}|${emails.map(e => e.toLowerCase()).sort().join(',')}`;
+        if (seen.has(key)) {
+            duplicates += 1;
+            return;
+        }
+        if (skipExisting && contactMatchesIndex(existingIndex, name, emails)) {
+            skippedExisting += 1;
+            return;
+        }
+        seen.add(key);
+        rows.push({ name, emails, notes: String(row.notes || '').trim() });
+    });
+
+    return { rows, skippedExisting, duplicates, needsName, total: (previewRows || []).length };
+}
+
+function ImportContactsModal({ onImportContacts, existingStudents = [], groupName = '', closeModal, themeClasses }) {
     const [activeTab, setActiveTab] = useState('paste'); // 'paste' | 'csv'
     const [previewRows, setPreviewRows] = useState([]); // { key, name, emails, notes }
     const [previewSource, setPreviewSource] = useState('');
@@ -3781,61 +3845,16 @@ function ImportContactsModal({ onImportContacts, existingStudents = [], closeMod
     const [pasteText, setPasteText] = useState('');
     const fileInputRef = useRef(null);
     const isDark = themeClasses.textPrimary.includes('text-[#fcfaf2]');
+    // How the skip option describes where it looks — only the current group.
+    const scopeLabel = groupName ? `\u201C${groupName}\u201D` : 'this group';
 
-    // Lookup of what is already stored, so the preview can flag duplicates.
-    const existingIndex = { names: new Set(), emails: new Set() };
-    (existingStudents || []).forEach(s => {
-        const name = String(s?.name || '').trim().toLowerCase();
-        if (name) existingIndex.names.add(name);
-        (s?.emails || []).forEach(addr => {
-            const value = String(addr || '').trim().toLowerCase();
-            if (value) existingIndex.emails.add(value);
-        });
-    });
-
-    const rowEmailList = (row) => String(row?.emails || '')
-        .split(/[\s,;]+/)
-        .map(e => e.trim())
-        .filter(Boolean);
-
-    const matchesExisting = (name, emails) => {
-        const cleanName = String(name || '').trim().toLowerCase();
-        if (cleanName && existingIndex.names.has(cleanName)) return true;
-        return emails.some(addr => existingIndex.emails.has(String(addr).toLowerCase()));
-    };
+    // Contacts already in THIS group only: the caller passes just the current
+    // group's contacts, so duplicate skipping never looks outside the group.
+    const existingIndex = buildExistingContactIndex(existingStudents);
+    const matchesExisting = (name, emails) => contactMatchesIndex(existingIndex, name, emails);
 
     // Work out exactly which rows would be imported, before importing.
-    const computeImportPlan = () => {
-        const seen = new Set();
-        const rows = [];
-        let skippedExisting = 0;
-        let duplicates = 0;
-        let needsName = 0;
-
-        previewRows.forEach(row => {
-            const name = String(row.name || '').trim();
-            const emails = rowEmailList(row);
-            if (!name) {
-                needsName += 1;
-                return;
-            }
-            const key = `${name.toLowerCase()}|${emails.map(e => e.toLowerCase()).sort().join(',')}`;
-            if (seen.has(key)) {
-                duplicates += 1;
-                return;
-            }
-            if (skipExisting && matchesExisting(name, emails)) {
-                skippedExisting += 1;
-                return;
-            }
-            seen.add(key);
-            rows.push({ name, emails, notes: String(row.notes || '').trim() });
-        });
-
-        return { rows, skippedExisting, duplicates, needsName, total: previewRows.length };
-    };
-
-    const importPlan = computeImportPlan();
+    const importPlan = planContactImport(previewRows, existingIndex, skipExisting);
 
     const showPreview = (records, source) => {
         if (!records || records.length === 0) {
@@ -3886,12 +3905,12 @@ function ImportContactsModal({ onImportContacts, existingStudents = [], closeMod
     };
 
     const handleImport = () => {
-        const plan = computeImportPlan();
+        const plan = planContactImport(previewRows, existingIndex, skipExisting);
         if (plan.rows.length === 0) {
             setParseError(plan.total === 0
                 ? 'There is nothing to import yet.'
                 : skipExisting && plan.skippedExisting > 0
-                    ? 'Everything here already exists in your contacts. Uncheck "Skip contacts I already have" to import anyway.'
+                    ? `Everything here already exists in ${scopeLabel}. Uncheck the skip option to import anyway.`
                     : 'Add a contact name to at least one row before importing.');
             return;
         }
@@ -4026,7 +4045,7 @@ function ImportContactsModal({ onImportContacts, existingStudents = [], closeMod
                                             </div>
                                             {(missingName || duplicate) && (
                                                 <p className={`text-[10px] font-bold mt-1 ml-1 ${missingName ? 'text-[#ff6188]' : isDark ? 'text-[#ffd866]' : 'text-[#8a6d00]'}`}>
-                                                    {missingName ? 'Needs a name to be imported' : 'Matches a contact you already have'}
+                                                    {missingName ? 'Needs a name to be imported' : `Already in ${scopeLabel}`}
                                                 </p>
                                             )}
                                         </div>
@@ -4038,7 +4057,7 @@ function ImportContactsModal({ onImportContacts, existingStudents = [], closeMod
                                 <div className="space-y-1.5 text-[11px] font-semibold text-gray-400">
                                     <p>
                                         <span className="text-[#a9dc76] font-bold">{importPlan.rows.length}</span> ready to import
-                                        {importPlan.skippedExisting > 0 && ` · ${importPlan.skippedExisting} already in your contacts`}
+                                        {importPlan.skippedExisting > 0 && ` · ${importPlan.skippedExisting} already in ${scopeLabel}`}
                                         {importPlan.duplicates > 0 && ` · ${importPlan.duplicates} duplicate row${importPlan.duplicates === 1 ? '' : 's'}`}
                                         {importPlan.needsName > 0 && ` · ${importPlan.needsName} without a name`}
                                     </p>
@@ -4049,7 +4068,7 @@ function ImportContactsModal({ onImportContacts, existingStudents = [], closeMod
                                             onChange={e => setSkipExisting(e.target.checked)}
                                             className="accent-[#ff6188]"
                                         />
-                                        Skip contacts I already have
+                                        Skip contacts already in {scopeLabel}
                                     </label>
                                 </div>
                                 <div className="flex gap-2">
