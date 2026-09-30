@@ -31,7 +31,7 @@ Organize contacts into folders and groups, compose messages, and send batch emai
 
 ### 👥 Manage Contacts
 - **Multiple Emails per Contact** — Store unlimited email addresses per person
-- **Bulk Import** — Paste tab-separated data or upload a CSV file with auto-detected headers
+- **Bulk Import** — Paste spreadsheet rows, a table copied out of Google Docs/Sheets, comma separated values, or a plain name-above-its-emails list (or upload a `.csv`/`.tsv` file). Header rows are skipped, every address is captured, and each import stops at an **editable review step** so you can fix, delete or skip rows before anything is added
 - **Standard Selection** — Click to select, `Ctrl`/`Cmd`+click to toggle, `Shift`+click for a range
 - **Delete Contacts** — Remove one contact or many at once from the row's trash button, the right-click menu, the "Delete Selected" button, or the `Delete` key (always with confirmation)
 - **Notes Field** — Attach context to any contact
@@ -98,13 +98,15 @@ npm run build
 npm run preview   # Preview the production build locally
 ```
 
-### Verify the Backup Path
+### Verify
 
 ```bash
-npm run verify-backup
+npm run verify            # both suites
+npm run verify-backup     # backup/sync files round-trip completely
+npm run verify-import     # contact import parses every supported format
 ```
 
-Proves that backup/sync files really contain everything: it round-trips a realistic dataset through encrypt → write → read → verify, and confirms that missing contacts, missing **email messages** or missing settings make verification fail loudly. Run it after touching anything in the backup/sync code.
+`verify-backup` round-trips a realistic dataset through encrypt → write → read → verify, and confirms that missing contacts, missing **email messages** or missing settings make verification fail loudly. `verify-import` feeds the pasted formats a real user might copy (Docs tables, stacks of names and emails, CSV with quoted commas) through the parser. Run both after touching the backup or import code.
 
 ---
 

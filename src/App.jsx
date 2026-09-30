@@ -292,7 +292,8 @@ async function buildBackupPayload(activeData, revision) {
 export {
     encryptExport, parseExport, getCanonicalData, normalizeImportedData,
     buildBackupPayload, verifyBackupRoundTrip, getDataSummary,
-    describeDataSummary, countEmailMessages, mergeContactRecords, readBackupSettings
+    describeDataSummary, countEmailMessages, mergeContactRecords, readBackupSettings,
+    parseContactsFromText, buildContactRecords, parseCSV
 };
 
 // Decrypts a file we just wrote and proves it still holds every folder, group,
@@ -645,6 +646,115 @@ const parseCSV = (text) => {
     }
     return lines;
 };
+
+// --- Flexible Contact Parser ------------------------------------------------
+// Accepts anything a person might paste: Google Docs/Sheets tables (tab
+// separated rows), comma separated rows, one value per line, "Name <email>",
+// a name line followed by its email line(s), several emails in one cell,
+// header rows, blank lines and stray CRLF characters.
+const CONTACT_EMAIL_RE = /[A-Za-z0-9._%+'-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+
+const CONTACT_HEADER_WORDS = new Set([
+    'name', 'names', 'full name', 'contact', 'contact name', 'student', 'student name',
+    'first name', 'last name', 'email', 'emails', 'e-mail', 'e-mails',
+    'email address', 'email addresses', 'e-mail address', 'e-mail addresses',
+    'address', 'phone', 'phone number', 'mobile', 'notes', 'note', 'comments',
+    'comment', 'title', 'role'
+]);
+
+function isContactHeaderRow(cells) {
+    if (!cells || cells.length === 0) return false;
+    const normalized = cells.map(c => String(c).trim().toLowerCase());
+    if (normalized.every(c => CONTACT_HEADER_WORDS.has(c))) return true;
+    const joined = normalized.join(' ');
+    return /^(name|full name|first name|last name|student name|contact name)[\s,&/+-]+(e-?mail|emails|address)/.test(joined)
+        || /^e-?mail(s)?[\s,&/+-]+(name|contact)/.test(joined);
+}
+
+function splitContactLine(line) {
+    if (line.includes('\t')) return line.split('\t');
+    if (line.includes(',')) return line.split(',');
+    return [line];
+}
+
+function makeContactRecord(name, emails, notes) {
+    return {
+        name: String(name || '')
+            .replace(/^(?:name|contact|student|full name|e-?mail)\s*[:\-–]\s*/i, '')
+            .trim(),
+        emails: (emails || []).filter(Boolean),
+        notes: String(notes || '').trim()
+    };
+}
+
+// rows: array of arrays of raw cell strings (already split on tabs/commas).
+function buildContactRecords(rows) {
+    const records = [];
+    // The most recent name-only row, which following email-only rows belong to
+    // ("name line" / "email line" / "email line" pastes).
+    let pendingName = null;
+
+    (rows || []).forEach(rawCells => {
+        const cells = (rawCells || [])
+            .map(c => String(c ?? '').replace(/\u00A0/g, ' ').trim())
+            .filter(c => c !== '');
+        if (cells.length === 0) return;
+        if (isContactHeaderRow(cells)) return;
+
+        const emails = [];
+        const texts = [];
+        cells.forEach(cell => {
+            const found = cell.match(CONTACT_EMAIL_RE) || [];
+            found.forEach(addr => {
+                const value = addr.trim();
+                if (value && !emails.includes(value)) emails.push(value);
+            });
+            const rest = cell
+                .replace(CONTACT_EMAIL_RE, ' ')
+                .replace(/^[\s,;:<>()\[\]"']+/, '')
+                .replace(/[\s,;:<>()\[\]"']+$/, '')
+                .trim();
+            if (rest) texts.push(rest);
+        });
+
+        if (emails.length > 0 && texts.length > 0) {
+            // "Name  email  note" on one row
+            const record = makeContactRecord(texts[0], emails, texts.slice(1).join(' '));
+            records.push(record);
+            pendingName = null;
+        } else if (emails.length > 0) {
+            // An email-only row belongs to the name above it; if there is no
+            // name to attach to, keep it as a nameless row the user can fix.
+            if (pendingName) {
+                emails.forEach(addr => {
+                    if (!pendingName.emails.includes(addr)) pendingName.emails.push(addr);
+                });
+            } else {
+                records.push(makeContactRecord('', emails, ''));
+            }
+        } else {
+            // Text-only row: a name (the preview lets the user fix it up).
+            const record = makeContactRecord(cells.join(' '), [], '');
+            records.push(record);
+            pendingName = record;
+        }
+    });
+
+    return records.filter(r => r.name !== '' || r.emails.length > 0);
+}
+
+function parseContactsFromText(text) {
+    const normalized = String(text ?? '')
+        .replace(/\r\n?/g, '\n')
+        .replace(/\u00A0/g, ' ');
+    // Text copied out of "Save as CSV" keeps its quotes and needs the strict
+    // CSV reader; everything else goes through the loose line reader.
+    if (normalized.includes('"') && normalized.includes(',')) {
+        const csvRows = parseCSV(normalized);
+        if (csvRows.some(row => row.length > 1)) return buildContactRecords(csvRows);
+    }
+    return buildContactRecords(normalized.split('\n').map(splitContactLine));
+}
 
 // --- Generic, Robust Custom Local Storage Hook ---
 // `onStorageError` (optional) is called if the browser refuses the write —
@@ -1176,41 +1286,28 @@ export default function App() {
         closeModals();
     };
 
-    const handleBulkAdd = (e) => {
-        e.preventDefault();
-        const rawData = e.target.bulkData.value;
-        const rows = rawData.split('\n');
-        const newStudents = [];
-
-        rows.forEach(row => {
-            const cols = row.split('\t');
-            if (cols.length > 0 && cols[0].trim() !== '') {
-                const name = cols[0].trim();
-                const emails = [];
-                let notes = '';
-
-                // Intelligently scan remaining columns for emails (presence of @ symbol)
-                for (let i = 1; i < cols.length; i++) {
-                    const val = cols[i].trim();
-                    if (val.includes('@')) {
-                        emails.push(val);
-                    } else if (val !== '') {
-                        notes = val;
-                    }
-                }
-
-                newStudents.push({
+    // Adds the contacts confirmed in the import preview.
+    // `contacts` = [{ name, emails: string[], notes }], `skippedCount` = rows
+    // the preview chose not to import (already present / duplicated).
+    const handleBulkAdd = (contacts, skippedCount = 0) => {
+        const rows = Array.isArray(contacts) ? contacts : [];
+        const newStudents = rows
+            .filter(c => c && String(c.name || '').trim() !== '')
+            .map(c => {
+                const emails = (Array.isArray(c.emails) ? c.emails : [])
+                    .map(e => String(e || '').trim())
+                    .filter(Boolean);
+                return {
                     id: generateId(),
                     classId: activeClassId,
-                    name: name,
+                    name: String(c.name).trim(),
                     emails: emails.length > 0 ? emails : [''],
-                    notes: notes,
+                    notes: String(c.notes || '').trim(),
                     timestamp: '',
                     message: '',
                     emailHistory: []
-                });
-            }
-        });
+                };
+            });
 
         if (newStudents.length > 0) {
             setData(prev => ({
@@ -1219,6 +1316,18 @@ export default function App() {
             }));
         }
         closeModals();
+        if (newStudents.length > 0) {
+            const skippedNote = skippedCount > 0
+                ? ` ${skippedCount} row${skippedCount === 1 ? '' : 's'} skipped (already in your contacts or duplicated).`
+                : '';
+            showAlert(
+                "Import Complete",
+                `Added ${newStudents.length} contact${newStudents.length === 1 ? '' : 's'}` +
+                (activeClassId ? ' to this group' : '') + '.' + skippedNote
+            );
+        } else {
+            showAlert("Nothing Imported", "No rows with a contact name were imported. Adjust the preview and try again.");
+        }
     };
 
     // Removes one or many contacts (ids) after an explicit confirmation
@@ -3039,26 +3148,8 @@ export default function App() {
             {/* Unified Import Contacts Modal (CSV + Paste) */}
             {modals.bulkAdd && (
                 <ImportContactsModal
-                    onImportPaste={handleBulkAdd}
-                    onImportCSV={(csvStudents) => {
-                        if (csvStudents.length > 0) {
-                            const formatted = csvStudents.map(s => ({
-                                id: generateId(),
-                                classId: activeClassId,
-                                name: s.name,
-                                emails: s.emails,
-                                notes: s.notes || '',
-                                timestamp: '',
-                                message: '',
-                                emailHistory: []
-                            }));
-                            setData(prev => ({
-                                ...prev,
-                                students: [...prev.students, ...formatted]
-                            }));
-                        }
-                        closeModals();
-                    }}
+                    onImportContacts={handleBulkAdd}
+                    existingStudents={data.students}
                     closeModal={closeModals}
                     themeClasses={themeClasses}
                 />
@@ -3211,6 +3302,8 @@ export default function App() {
                                     <span className="text-[10px] text-gray-500 font-mono">2026-09-28</span>
                                 </div>
                                 <ul className="list-disc pl-4 text-xs space-y-1 text-gray-600 dark:text-gray-400">
+                                    <li>Contact importing accepts far more formats: Google Docs/Sheets tables (tab separated), comma separated rows, addresses wrapped as <code>Name &lt;email&gt;</code>, a name on one line with its emails on the next, several emails per row, header rows and blank lines.</li>
+                                    <li>Every import now stops at a <strong>review step</strong>: the parsed rows appear in an editable table (name / emails / notes) where you can correct, delete or add rows, see which contacts you already have, and skip them before confirming.</li>
                                     <li>Backups and sync files are verified before they count as saved: the app decrypts the file it just wrote and confirms the folder, group, contact and email-message counts (and contents) still match — otherwise the save fails loudly instead of writing an incomplete file.</li>
                                     <li>The restore screen now shows how many <strong>email messages</strong> a file contains, and the confirmation after a download repeats the full contents of the backup.</li>
                                     <li>"Import New Items Only" now merges: contacts you already have absorb any email messages from the file instead of being skipped.</li>
@@ -3657,12 +3750,132 @@ export default function App() {
 }
 
 // --- Import Contacts Sub-Component ---
-function ImportContactsModal({ onImportPaste, onImportCSV, closeModal, themeClasses }) {
+function ImportContactsModal({ onImportContacts, existingStudents = [], closeModal, themeClasses }) {
     const [activeTab, setActiveTab] = useState('paste'); // 'paste' | 'csv'
-    const [csvPreview, setCsvPreview] = useState([]);
+    const [previewRows, setPreviewRows] = useState([]); // { key, name, emails, notes }
+    const [previewSource, setPreviewSource] = useState('');
+    const [parseError, setParseError] = useState('');
+    const [skipExisting, setSkipExisting] = useState(true);
     const [csvFileName, setCsvFileName] = useState('');
+    const [pasteText, setPasteText] = useState('');
     const fileInputRef = useRef(null);
     const isDark = themeClasses.textPrimary.includes('text-[#fcfaf2]');
+
+    // Lookup of what is already stored, so the preview can flag duplicates.
+    const existingIndex = { names: new Set(), emails: new Set() };
+    (existingStudents || []).forEach(s => {
+        const name = String(s?.name || '').trim().toLowerCase();
+        if (name) existingIndex.names.add(name);
+        (s?.emails || []).forEach(addr => {
+            const value = String(addr || '').trim().toLowerCase();
+            if (value) existingIndex.emails.add(value);
+        });
+    });
+
+    const rowEmailList = (row) => String(row?.emails || '')
+        .split(/[\s,;]+/)
+        .map(e => e.trim())
+        .filter(Boolean);
+
+    const matchesExisting = (name, emails) => {
+        const cleanName = String(name || '').trim().toLowerCase();
+        if (cleanName && existingIndex.names.has(cleanName)) return true;
+        return emails.some(addr => existingIndex.emails.has(String(addr).toLowerCase()));
+    };
+
+    // Work out exactly which rows would be imported, before importing.
+    const computeImportPlan = () => {
+        const seen = new Set();
+        const rows = [];
+        let skippedExisting = 0;
+        let duplicates = 0;
+        let needsName = 0;
+
+        previewRows.forEach(row => {
+            const name = String(row.name || '').trim();
+            const emails = rowEmailList(row);
+            if (!name) {
+                needsName += 1;
+                return;
+            }
+            const key = `${name.toLowerCase()}|${emails.map(e => e.toLowerCase()).sort().join(',')}`;
+            if (seen.has(key)) {
+                duplicates += 1;
+                return;
+            }
+            if (skipExisting && matchesExisting(name, emails)) {
+                skippedExisting += 1;
+                return;
+            }
+            seen.add(key);
+            rows.push({ name, emails, notes: String(row.notes || '').trim() });
+        });
+
+        return { rows, skippedExisting, duplicates, needsName, total: previewRows.length };
+    };
+
+    const importPlan = computeImportPlan();
+
+    const showPreview = (records, source) => {
+        if (!records || records.length === 0) {
+            setPreviewRows([]);
+            setPreviewSource('');
+            setParseError('No contacts found in that data — each contact needs a name and/or an email address.');
+            return;
+        }
+        setPreviewRows(records.map((record, index) => ({
+            key: `${Date.now()}-${index}`,
+            name: record.name || '',
+            emails: (record.emails || []).join(', '),
+            notes: record.notes || ''
+        })));
+        setPreviewSource(source);
+        setParseError('');
+    };
+
+    const handlePasteSubmit = (e) => {
+        e.preventDefault();
+        const text = e.target.bulkData.value;
+        setPasteText(text);
+        showPreview(parseContactsFromText(text), 'pasted text');
+    };
+
+    const updateRow = (key, field, value) => {
+        setParseError('');
+        setPreviewRows(rows => rows.map(row => row.key === key ? { ...row, [field]: value } : row));
+    };
+
+    const removeRow = (key) => {
+        setParseError('');
+        setPreviewRows(rows => rows.filter(row => row.key !== key));
+    };
+
+    const addRow = () => {
+        setParseError('');
+        setPreviewRows(rows => [...rows, {
+            key: `${Date.now()}-${rows.length}-new`,
+            name: '', emails: '', notes: ''
+        }]);
+    };
+
+    const clearPreview = () => {
+        setPreviewRows([]);
+        setPreviewSource('');
+        setParseError('');
+    };
+
+    const handleImport = () => {
+        const plan = computeImportPlan();
+        if (plan.rows.length === 0) {
+            setParseError(plan.total === 0
+                ? 'There is nothing to import yet.'
+                : skipExisting && plan.skippedExisting > 0
+                    ? 'Everything here already exists in your contacts. Uncheck "Skip contacts I already have" to import anyway.'
+                    : 'Add a contact name to at least one row before importing.');
+            return;
+        }
+        onImportContacts(plan.rows, plan.skippedExisting + plan.duplicates);
+    };
 
     const handleFileChange = (e) => {
         const file = e.target.files[0];
@@ -3672,40 +3885,12 @@ function ImportContactsModal({ onImportPaste, onImportCSV, closeModal, themeClas
         const reader = new FileReader();
         reader.onload = (event) => {
             const text = event.target.result;
-            const rawRows = parseCSV(text);
-            const parsedContacts = [];
-
-            // Identify header index values if any, else assume standard columns
-            let startIdx = 0;
-            if (rawRows.length > 0 && (rawRows[0][0]?.toLowerCase().includes('name') || rawRows[0][1]?.toLowerCase().includes('email'))) {
-                startIdx = 1; // Skip header row
-            }
-
-            for (let i = startIdx; i < rawRows.length; i++) {
-                const row = rawRows[i];
-                if (row.length > 0 && row[0]?.trim() !== '') {
-                    const name = row[0].trim();
-                    const emails = [];
-                    let notes = '';
-
-                    for (let j = 1; j < row.length; j++) {
-                        const val = row[j]?.trim() || '';
-                        if (val.includes('@')) {
-                            emails.push(val);
-                        } else if (val !== '') {
-                            notes = val;
-                        }
-                    }
-
-                    parsedContacts.push({
-                        name,
-                        emails: emails.length > 0 ? emails : [''],
-                        notes
-                    });
-                }
-            }
-
-            setCsvPreview(parsedContacts);
+            const csvRows = parseCSV(text);
+            const multiColumn = csvRows.some(row => row.length > 1);
+            // Files saved out of Sheets/Docs are often really tab separated,
+            // and single-column files are just "name line / email line" lists.
+            const records = multiColumn ? buildContactRecords(csvRows) : parseContactsFromText(text);
+            showPreview(records, file.name);
         };
         reader.readAsText(file);
     };
@@ -3719,46 +3904,157 @@ function ImportContactsModal({ onImportPaste, onImportCSV, closeModal, themeClas
                 </div>
 
                 {/* Tab Controls */}
-                <div className="flex border-b border-gray-200/10">
-                    <button
-                        type="button"
-                        onClick={() => setActiveTab('paste')}
-                        className={`flex-1 py-3 text-center text-sm font-bold border-b-2 transition-all ${activeTab === 'paste' ? 'border-[#ff6188] text-[#ff6188] bg-[#ff6188]/5' : 'border-transparent text-gray-400 hover:text-gray-200'}`}
-                    >
-                        Paste Spreadsheet Rows
-                    </button>
-                    <button
-                        type="button"
-                        onClick={() => setActiveTab('csv')}
-                        className={`flex-1 py-3 text-center text-sm font-bold border-b-2 transition-all ${activeTab === 'csv' ? 'border-b-[#ff6188] text-[#ff6188] bg-[#ff6188]/5' : 'border-transparent text-gray-400 hover:text-gray-200'}`}
-                    >
-                        Upload CSV File
-                    </button>
-                </div>
+                {previewRows.length === 0 && (
+                    <div className="flex border-b border-gray-200/10">
+                        <button
+                            type="button"
+                            onClick={() => setActiveTab('paste')}
+                            className={`flex-1 py-3 text-center text-sm font-bold border-b-2 transition-all ${activeTab === 'paste' ? 'border-[#ff6188] text-[#ff6188] bg-[#ff6188]/5' : 'border-transparent text-gray-400 hover:text-gray-200'}`}
+                        >
+                            Paste Rows
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setActiveTab('csv')}
+                            className={`flex-1 py-3 text-center text-sm font-bold border-b-2 transition-all ${activeTab === 'csv' ? 'border-b-[#ff6188] text-[#ff6188] bg-[#ff6188]/5' : 'border-transparent text-gray-400 hover:text-gray-200'}`}
+                        >
+                            Upload CSV File
+                        </button>
+                    </div>
+                )}
 
                 <div className="flex-1 flex flex-col p-5 overflow-hidden min-h-0">
-                    {activeTab === 'paste' ? (
-                        <form onSubmit={onImportPaste} className="flex-1 flex flex-col min-h-0">
+                    {parseError && (
+                        <div className="bg-[#ff6188]/10 border border-[#ff6188]/20 text-[#ff6188] p-3 rounded-xl text-xs mb-4 leading-relaxed font-semibold">
+                            {parseError}
+                        </div>
+                    )}
+
+                    {previewRows.length > 0 ? (
+                        /* ---------- Step 2: review & adjust before importing ---------- */
+                        <div className="flex-1 flex flex-col min-h-0 animate-in fade-in duration-200">
+                            <div className="flex items-start justify-between gap-3 mb-3">
+                                <div className="min-w-0">
+                                    <h4 className="font-extrabold text-xs text-gray-400 uppercase tracking-wider">Review before importing</h4>
+                                    <p className="text-[11px] text-gray-500 mt-0.5">
+                                        {previewRows.length} row{previewRows.length === 1 ? '' : 's'} read from {previewSource}. Edit anything that looks wrong, delete rows you don't want, then import.
+                                    </p>
+                                </div>
+                                <div className="flex gap-2 flex-shrink-0">
+                                    <button type="button" onClick={clearPreview} className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${themeClasses.btnSecondary}`}>Back</button>
+                                    <button type="button" onClick={addRow} className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1 ${themeClasses.btnSecondary}`}>
+                                        <Plus size={12} /> Add Row
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div className="hidden sm:flex gap-2 px-1 pb-1 text-[10px] font-bold uppercase tracking-wider text-gray-400">
+                                <span className="flex-1">Name</span>
+                                <span className="flex-[1.4]">Emails (comma separated)</span>
+                                <span className="flex-1">Notes</span>
+                                <span className="w-6" />
+                            </div>
+
+                            <div className="flex-1 min-h-0 overflow-y-auto border border-gray-200/10 rounded-xl bg-gray-500/5 p-2 space-y-2">
+                                {previewRows.map(row => {
+                                    const missingName = String(row.name).trim() === '';
+                                    const duplicate = !missingName && matchesExisting(row.name, rowEmailList(row));
+                                    return (
+                                        <div key={row.key} className="pr-1">
+                                            <div className="flex items-center gap-2">
+                                                <input
+                                                    value={row.name}
+                                                    onChange={e => updateRow(row.key, 'name', e.target.value)}
+                                                    placeholder="Full name"
+                                                    className={`min-w-0 flex-1 border rounded-lg px-2.5 py-2 text-xs outline-none focus:ring-2 focus:ring-[#ff6188] transition-all ${missingName ? 'border-[#ff6188]/70' : 'border-gray-200/15'}`}
+                                                />
+                                                <input
+                                                    value={row.emails}
+                                                    onChange={e => updateRow(row.key, 'emails', e.target.value)}
+                                                    placeholder="a@example.com, b@example.com"
+                                                    className="min-w-0 flex-[1.4] border border-gray-200/15 rounded-lg px-2.5 py-2 text-xs outline-none focus:ring-2 focus:ring-[#ff6188] transition-all"
+                                                />
+                                                <input
+                                                    value={row.notes}
+                                                    onChange={e => updateRow(row.key, 'notes', e.target.value)}
+                                                    placeholder="Optional note"
+                                                    className="min-w-0 flex-1 border border-gray-200/15 rounded-lg px-2.5 py-2 text-xs outline-none focus:ring-2 focus:ring-[#ff6188] transition-all"
+                                                />
+                                                <button
+                                                    type="button"
+                                                    onClick={() => removeRow(row.key)}
+                                                    title="Remove this row"
+                                                    className="text-gray-500 hover:text-[#ff6188] p-1.5 rounded-lg hover:bg-[#ff6188]/10 transition-all flex-shrink-0"
+                                                >
+                                                    <Trash size={13} />
+                                                </button>
+                                            </div>
+                                            {(missingName || duplicate) && (
+                                                <p className={`text-[10px] font-bold mt-1 ml-1 ${missingName ? 'text-[#ff6188]' : isDark ? 'text-[#ffd866]' : 'text-[#8a6d00]'}`}>
+                                                    {missingName ? 'Needs a name to be imported' : 'Matches a contact you already have'}
+                                                </p>
+                                            )}
+                                        </div>
+                                    );
+                                })}
+                            </div>
+
+                            <div className="flex flex-wrap items-end justify-between gap-3 pt-3 mt-3 border-t border-gray-200/10">
+                                <div className="space-y-1.5 text-[11px] font-semibold text-gray-400">
+                                    <p>
+                                        <span className="text-[#a9dc76] font-bold">{importPlan.rows.length}</span> ready to import
+                                        {importPlan.skippedExisting > 0 && ` · ${importPlan.skippedExisting} already in your contacts`}
+                                        {importPlan.duplicates > 0 && ` · ${importPlan.duplicates} duplicate row${importPlan.duplicates === 1 ? '' : 's'}`}
+                                        {importPlan.needsName > 0 && ` · ${importPlan.needsName} without a name`}
+                                    </p>
+                                    <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                                        <input
+                                            type="checkbox"
+                                            checked={skipExisting}
+                                            onChange={e => setSkipExisting(e.target.checked)}
+                                            className="accent-[#ff6188]"
+                                        />
+                                        Skip contacts I already have
+                                    </label>
+                                </div>
+                                <div className="flex gap-2">
+                                    <button type="button" onClick={closeModal} className={`px-4 py-2 rounded-lg text-xs font-bold transition-all ${themeClasses.btnSecondary}`}>Cancel</button>
+                                    <button
+                                        type="button"
+                                        onClick={handleImport}
+                                        disabled={importPlan.rows.length === 0}
+                                        className={`px-5 py-2 rounded-lg text-xs font-bold transition-all active:scale-95 ${importPlan.rows.length > 0 ? themeClasses.btnPrimary : 'bg-gray-200 text-gray-400 cursor-not-allowed shadow-none'}`}
+                                    >
+                                        Import {importPlan.rows.length} Contact{importPlan.rows.length === 1 ? '' : 's'}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    ) : activeTab === 'paste' ? (
+                        /* ---------- Step 1: paste anything ---------- */
+                        <form onSubmit={handlePasteSubmit} className="flex-1 flex flex-col min-h-0">
                             <div className="bg-[#ff6188]/10 border border-[#ff6188]/20 text-[#ff6188] p-3 rounded-xl text-xs mb-4 leading-relaxed font-semibold">
-                                <strong>Copy/Paste Rows:</strong> Copy rows directly from Excel or Google Sheets and paste them below.
-                                Ensure your first column is the <strong>Name</strong>. Any subsequent columns containing an <code>@</code> symbol will automatically be captured as additional email addresses!
+                                <strong>Paste anything:</strong> spreadsheet rows, a table copied out of Google Docs (tab separated), comma separated values, or a simple list where each <strong>name sits above/beside its emails</strong>.
+                                Header rows are skipped, several emails per contact are kept, and you'll review and adjust everything before it is imported.
                             </div>
                             <textarea
                                 required
                                 autoFocus
                                 name="bulkData"
+                                defaultValue={pasteText}
                                 className="w-full flex-1 border border-gray-200/10 rounded-xl p-3.5 font-mono text-sm focus:ring-2 focus:ring-[#ff6188] outline-none whitespace-pre overflow-auto bg-gray-500/5 text-[#fcfaf2] dark:text-[#fcfaf2]"
-                                placeholder={`Alex Smith\tsarah.smith@example.com\tparent@example.com\tMother: Sarah Smith&#10;Emily Davis\tpeter.davis@example.com\t\tFather: Peter`}
+                                placeholder={"Name\tEmail\tEmail 2\tNotes\nAlex Smith\tsarah.smith@example.com\tparent@example.com\tMother: Sarah Smith\nElla St Pierre\nellas111@deltalearns.ca\nJon Doe, jon@example.com, 555-0100"}
                             />
                             <div className="flex justify-end gap-2 pt-4 mt-4 border-t border-gray-200/10">
                                 <button type="button" onClick={closeModal} className={`px-4 py-2 rounded-lg text-xs font-bold transition-all ${themeClasses.btnSecondary}`}>Cancel</button>
-                                <button type="submit" className={`px-4 py-2 rounded-lg text-xs font-bold transition-all ${themeClasses.btnPrimary}`}>Import Data</button>
+                                <button type="submit" className={`px-5 py-2 rounded-lg text-xs font-bold transition-all active:scale-95 ${themeClasses.btnPrimary}`}>Preview Import</button>
                             </div>
                         </form>
                     ) : (
+                        /* ---------- Step 1: upload a file ---------- */
                         <div className="flex-1 flex flex-col min-h-0">
                             <div className="bg-[#78dce8]/10 border border-[#78dce8]/20 text-[#78dce8] p-3 rounded-xl text-xs mb-4 leading-relaxed font-semibold">
-                                <strong>Upload CSV:</strong> Select a standard comma-separated `.csv` file. The local parser scans column values: the first populated cell is the name, columns containing <code>@</code> are imported as emails, and other cells map to notes.
+                                <strong>Upload CSV:</strong> comma or tab separated, with or without a header row. The first text cell is read as the name, anything with an <code>@</code> becomes an email, and other cells become notes. You'll review everything before it is imported.
                             </div>
 
                             <div className="flex flex-col items-center justify-center p-8 border-2 border-dashed border-gray-300/30 rounded-2xl hover:bg-gray-500/5 transition-all mb-4 cursor-pointer" onClick={() => fileInputRef.current.click()}>
@@ -3769,42 +4065,14 @@ function ImportContactsModal({ onImportPaste, onImportCSV, closeModal, themeClas
                                 <input
                                     type="file"
                                     ref={fileInputRef}
-                                    accept=".csv"
+                                    accept=".csv,.tsv,.txt"
                                     className="hidden"
                                     onChange={handleFileChange}
                                 />
                             </div>
 
-                            {csvPreview.length > 0 && (
-                                <div className="flex-1 flex flex-col min-h-0 animate-in fade-in duration-300">
-                                    <h4 className="font-extrabold text-xs text-gray-400 uppercase tracking-wider mb-2">Import Preview ({csvPreview.length} contacts found):</h4>
-                                    <div className="border border-gray-200/10 rounded-xl overflow-y-auto flex-1 bg-gray-500/5 p-2 space-y-1">
-                                        {csvPreview.slice(0, 10).map((p, idx) => (
-                                            <div key={idx} className="bg-white/5 p-2.5 rounded-lg border border-gray-200/5 flex justify-between text-xs items-center font-medium">
-                                                <span className="font-bold">{p.name}</span>
-                                                <span className="text-gray-400 truncate max-w-[300px]">{p.emails.filter(Boolean).join(', ')}</span>
-                                            </div>
-                                        ))}
-                                        {csvPreview.length > 10 && (
-                                            <div className="text-center text-xs text-gray-400 py-1 font-bold">
-                                                + {csvPreview.length - 10} more rows
-                                            </div>
-                                        )}
-                                    </div>
-                                </div>
-                            )}
-
                             <div className="flex justify-end gap-2 pt-4 mt-auto border-t border-gray-200/10">
                                 <button type="button" onClick={closeModal} className={`px-4 py-2 rounded-lg text-xs font-bold transition-all ${themeClasses.btnSecondary}`}>Cancel</button>
-                                <button
-                                    type="button"
-                                    disabled={csvPreview.length === 0}
-                                    onClick={() => onImportCSV(csvPreview)}
-                                    className={`px-5 py-2 rounded-lg text-xs font-bold transition-all active:scale-95 ${csvPreview.length > 0 ? themeClasses.btnPrimary : 'bg-gray-200 text-gray-400 cursor-not-allowed shadow-none'
-                                        }`}
-                                >
-                                    Import {csvPreview.length} Contacts
-                                </button>
                             </div>
                         </div>
                     )}

@@ -8,6 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "verify-backup": "node scripts/verify_backup_integrity.mjs",
+    "verify-import": "node scripts/verify_contact_import.mjs",
+    "verify": "npm run verify-backup && npm run verify-import",
     "generate-favicons": "python3 scripts/generate_favicons.py"
   },
   "dependencies": {
