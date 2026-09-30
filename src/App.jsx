@@ -293,7 +293,8 @@ export {
     encryptExport, parseExport, getCanonicalData, normalizeImportedData,
     buildBackupPayload, verifyBackupRoundTrip, getDataSummary,
     describeDataSummary, countEmailMessages, mergeContactRecords, readBackupSettings,
-    parseContactsFromText, buildContactRecords, parseCSV
+    parseContactsFromText, buildContactRecords, parseCSV,
+    IMPORT_EXAMPLE_PASTE, IMPORT_EXAMPLE_CSV
 };
 
 // Decrypts a file we just wrote and proves it still holds every folder, group,
@@ -3750,6 +3751,26 @@ export default function App() {
 }
 
 // --- Import Contacts Sub-Component ---
+
+// Sample rows shown inside the import dialog. Every value here is invented
+// (RFC 2606 reserves example.com / example.org / example.net, and 555-01xx
+// phone numbers), so no real contact data is ever shown or shipped.
+const IMPORT_EXAMPLE_PASTE = [
+    'Name\tEmail\tEmail 2\tNotes',
+    'Jamie Rivera\tjamie.rivera@example.com\tparent@example.org\tSibling: Alex Rivera',
+    'Priya Nair, priya.nair@example.com, Class rep',
+    'Sam Lee',
+    'sam.lee@example.com',
+    'parent@example.com'
+].join('\n');
+
+const IMPORT_EXAMPLE_CSV = [
+    'Name,Email,Email 2,Notes',
+    'Jamie Rivera,jamie.rivera@example.com,parent@example.org,Sibling: Alex Rivera',
+    'Priya Nair,priya.nair@example.com,,Class rep',
+    'Sam Lee,sam.lee@example.com,parent@example.com,New neighbour'
+].join('\n');
+
 function ImportContactsModal({ onImportContacts, existingStudents = [], closeModal, themeClasses }) {
     const [activeTab, setActiveTab] = useState('paste'); // 'paste' | 'csv'
     const [previewRows, setPreviewRows] = useState([]); // { key, name, emails, notes }
@@ -3895,6 +3916,20 @@ function ImportContactsModal({ onImportContacts, existingStudents = [], closeMod
         reader.readAsText(file);
     };
 
+    // Hands the user a working sample file so the upload path can be tried
+    // end to end. Contents are the same invented rows as the paste example.
+    const downloadCsvExample = () => {
+        const blob = new Blob([`${IMPORT_EXAMPLE_CSV}\n`], { type: 'text/csv;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = 'sample-contacts.csv';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+    };
+
     return (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4 backdrop-blur-xs">
             <div className={`rounded-2xl shadow-xl w-full max-w-2xl overflow-hidden flex flex-col h-[80vh] border animate-in fade-in zoom-in-95 duration-200 ${themeClasses.cardBg}`}>
@@ -4032,18 +4067,40 @@ function ImportContactsModal({ onImportContacts, existingStudents = [], closeMod
                         </div>
                     ) : activeTab === 'paste' ? (
                         /* ---------- Step 1: paste anything ---------- */
-                        <form onSubmit={handlePasteSubmit} className="flex-1 flex flex-col min-h-0">
+                        <form onSubmit={handlePasteSubmit} className="flex-1 flex flex-col min-h-0 overflow-y-auto">
                             <div className="bg-[#ff6188]/10 border border-[#ff6188]/20 text-[#ff6188] p-3 rounded-xl text-xs mb-4 leading-relaxed font-semibold">
                                 <strong>Paste anything:</strong> spreadsheet rows, a table copied out of Google Docs (tab separated), comma separated values, or a simple list where each <strong>name sits above/beside its emails</strong>.
                                 Header rows are skipped, several emails per contact are kept, and you'll review and adjust everything before it is imported.
                             </div>
+
+                            <div className="border border-gray-200/10 rounded-xl bg-gray-500/5 p-3 mb-4">
+                                <div className="flex items-center justify-between gap-2 mb-2">
+                                    <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Example (all fake data)</span>
+                                    <button
+                                        type="button"
+                                        onClick={() => setPasteText(IMPORT_EXAMPLE_PASTE)}
+                                        className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-[#ff6188]/15 text-[#ff6188] hover:bg-[#ff6188]/25 transition-all flex-shrink-0"
+                                    >
+                                        Use this example
+                                    </button>
+                                </div>
+                                <pre className="font-mono text-[11px] leading-5 whitespace-pre overflow-x-auto text-gray-300" style={{ tabSize: 4 }}>{IMPORT_EXAMPLE_PASTE}</pre>
+                                <ul className="mt-2 space-y-1 text-[11px] text-gray-500 leading-relaxed">
+                                    <li><span className="font-bold text-gray-400">Line 1</span> — header row, it is skipped.</li>
+                                    <li><span className="font-bold text-gray-400">Line 2</span> — one spreadsheet row: name, two emails, a note (columns are split on tabs).</li>
+                                    <li><span className="font-bold text-gray-400">Line 3</span> — the same thing, comma separated: name, email, note.</li>
+                                    <li><span className="font-bold text-gray-400">Lines 4–6</span> — a name with its emails underneath: both addresses belong to Sam Lee.</li>
+                                </ul>
+                            </div>
+
                             <textarea
                                 required
                                 autoFocus
                                 name="bulkData"
-                                defaultValue={pasteText}
-                                className="w-full flex-1 border border-gray-200/10 rounded-xl p-3.5 font-mono text-sm focus:ring-2 focus:ring-[#ff6188] outline-none whitespace-pre overflow-auto bg-gray-500/5 text-[#fcfaf2] dark:text-[#fcfaf2]"
-                                placeholder={"Name\tEmail\tEmail 2\tNotes\nAlex Smith\tsarah.smith@example.com\tparent@example.com\tMother: Sarah Smith\nElla St Pierre\nellas111@deltalearns.ca\nJon Doe, jon@example.com, 555-0100"}
+                                value={pasteText}
+                                onChange={e => setPasteText(e.target.value)}
+                                placeholder={'Paste your rows here, or click "Use this example" above to load the sample.'}
+                                className="w-full flex-1 min-h-[120px] border border-gray-200/10 rounded-xl p-3.5 font-mono text-sm focus:ring-2 focus:ring-[#ff6188] outline-none whitespace-pre overflow-auto bg-gray-500/5 text-[#fcfaf2] dark:text-[#fcfaf2]"
                             />
                             <div className="flex justify-end gap-2 pt-4 mt-4 border-t border-gray-200/10">
                                 <button type="button" onClick={closeModal} className={`px-4 py-2 rounded-lg text-xs font-bold transition-all ${themeClasses.btnSecondary}`}>Cancel</button>
@@ -4052,9 +4109,28 @@ function ImportContactsModal({ onImportContacts, existingStudents = [], closeMod
                         </form>
                     ) : (
                         /* ---------- Step 1: upload a file ---------- */
-                        <div className="flex-1 flex flex-col min-h-0">
+                        <div className="flex-1 flex flex-col min-h-0 overflow-y-auto">
                             <div className="bg-[#78dce8]/10 border border-[#78dce8]/20 text-[#78dce8] p-3 rounded-xl text-xs mb-4 leading-relaxed font-semibold">
                                 <strong>Upload CSV:</strong> comma or tab separated, with or without a header row. The first text cell is read as the name, anything with an <code>@</code> becomes an email, and other cells become notes. You'll review everything before it is imported.
+                            </div>
+
+                            <div className="border border-gray-200/10 rounded-xl bg-gray-500/5 p-3 mb-4">
+                                <div className="flex items-center justify-between gap-2 mb-2">
+                                    <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Example (all fake data)</span>
+                                    <button
+                                        type="button"
+                                        onClick={downloadCsvExample}
+                                        className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-[#78dce8]/15 text-[#78dce8] hover:bg-[#78dce8]/25 transition-all flex flex-shrink-0 items-center gap-1"
+                                    >
+                                        <Download size={12} /> Sample file
+                                    </button>
+                                </div>
+                                <pre className="font-mono text-[11px] leading-5 whitespace-pre overflow-x-auto text-gray-300">{IMPORT_EXAMPLE_CSV}</pre>
+                                <ul className="mt-2 space-y-1 text-[11px] text-gray-500 leading-relaxed">
+                                    <li><span className="font-bold text-gray-400">Row 1</span> — header row; it is skipped, but it can also be left out.</li>
+                                    <li><span className="font-bold text-gray-400">Row 2</span> — name, two emails (one per column), note.</li>
+                                    <li><span className="font-bold text-gray-400">Rows 3–4</span> — one email each; an empty <code>Email 2</code> cell is fine.</li>
+                                </ul>
                             </div>
 
                             <div className="flex flex-col items-center justify-center p-8 border-2 border-dashed border-gray-300/30 rounded-2xl hover:bg-gray-500/5 transition-all mb-4 cursor-pointer" onClick={() => fileInputRef.current.click()}>
