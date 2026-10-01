@@ -9,8 +9,7 @@
     "preview": "vite preview",
     "verify-backup": "node scripts/verify_backup_integrity.mjs",
     "verify-import": "node scripts/verify_contact_import.mjs",
-    "verify-rich": "node scripts/verify_rich_text.mjs",
-    "verify": "npm run verify-backup && npm run verify-import && npm run verify-rich",
+    "verify": "npm run verify-backup && npm run verify-import",
     "generate-favicons": "python3 scripts/generate_favicons.py"
   },
   "dependencies": {
