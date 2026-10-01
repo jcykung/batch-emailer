@@ -4,7 +4,8 @@ import {
     CheckSquare, Square, X, Archive, FileText, Check, AlertCircle,
     Copy, ExternalLink, RefreshCw, FolderOpen, MoreVertical, Menu,
     ChevronDown, ChevronUp, Clock, History, Trash, Printer, FileSpreadsheet,
-    Sun, Moon, Sparkles, Coffee, AlertTriangle, CheckCircle2, Cloud, CloudOff
+    Sun, Moon, Sparkles, Coffee, AlertTriangle, CheckCircle2, Cloud, CloudOff,
+    Pin, PinOff
 } from 'lucide-react';
 import { getSyncHandle, setSyncHandle, clearSyncHandle, putAutoBackup } from './syncStorage.js';
 
@@ -97,6 +98,7 @@ function getCanonicalData(folders = null, classes = null, students = null) {
         id: f.id,
         name: f.name || '',
         isArchived: !!f.isArchived,
+        isPinned: !!f.isPinned,
         createdAt: f.createdAt || ''
     }));
 
@@ -865,8 +867,12 @@ export default function App() {
     const [selectedStudents, setSelectedStudents] = useState([]);
     const [lastSelectedStudentId, setLastSelectedStudentId] = useState(null);
 
-    // Right-click context menu for contact rows ({ studentId, x, y } or null)
+    // Right-click context menu ({ type: 'contact'|'folder', ... , x, y } or null)
     const [contextMenu, setContextMenu] = useState(null);
+
+    // Sidebar sections: Pinned and Groups (both collapsible via their headers)
+    const [pinnedOpen, setPinnedOpen] = useState(true);
+    const [groupsOpen, setGroupsOpen] = useState(true);
 
     // Dynamic email inputs state for modal
     const [modalEmails, setModalEmails] = useState(['']);
@@ -1115,6 +1121,7 @@ export default function App() {
 
     // Data helpers
     const activeFolders = data.folders.filter(f => showArchived ? true : !f.isArchived);
+    const pinnedFolders = activeFolders.filter(f => f.isPinned);
     const activeClasses = data.classes.filter(c =>
         showArchived ? true : !c.isArchived
     );
@@ -1225,7 +1232,23 @@ export default function App() {
         const MENU_WIDTH = 200;
         const MENU_HEIGHT = 116;
         setContextMenu({
+            type: 'contact',
             studentId,
+            x: Math.max(8, Math.min(e.clientX, window.innerWidth - MENU_WIDTH - 8)),
+            y: Math.max(8, Math.min(e.clientY, window.innerHeight - MENU_HEIGHT - 8))
+        });
+    };
+
+    // Right-click on a sidebar folder: pin/unpin, edit, archive, delete
+    const openFolderContextMenu = (e, folderId) => {
+        e.preventDefault();
+        e.stopPropagation();
+
+        const MENU_WIDTH = 200;
+        const MENU_HEIGHT = 190;
+        setContextMenu({
+            type: 'folder',
+            folderId,
             x: Math.max(8, Math.min(e.clientX, window.innerWidth - MENU_WIDTH - 8)),
             y: Math.max(8, Math.min(e.clientY, window.innerHeight - MENU_HEIGHT - 8))
         });
@@ -1254,7 +1277,7 @@ export default function App() {
                 folders: prev.folders.map(f => f.id === editingItem.id ? { ...f, name } : f)
             }));
         } else {
-            const newFolder = { id: generateId(), name, isArchived: false, createdAt: new Date().toISOString() };
+            const newFolder = { id: generateId(), name, isArchived: false, isPinned: false, createdAt: new Date().toISOString() };
             setData(prev => ({ ...prev, folders: [...prev.folders, newFolder] }));
             setActiveFolderId(newFolder.id);
         }
@@ -1445,6 +1468,15 @@ export default function App() {
             ...prev,
             folders: prev.folders.map(f => f.id === id ? { ...f, isArchived: !f.isArchived } : f)
         }));
+    };
+
+    // Pinning puts a folder in the sidebar's collapsible Pinned section
+    const togglePinFolder = (id) => {
+        setData(prev => ({
+            ...prev,
+            folders: prev.folders.map(f => f.id === id ? { ...f, isPinned: !f.isPinned } : f)
+        }));
+        setPinnedOpen(true);
     };
 
     const toggleArchiveClass = (id) => {
@@ -2486,15 +2518,106 @@ export default function App() {
     };
 
     // Contact context menu: the contact that was right-clicked, and what a "Delete" click removes
-    const contextTargetStudent = contextMenu ? classStudents.find(s => s.id === contextMenu.studentId) : null;
-    const contextMenuTargets = contextMenu
+    const isContactMenu = !!contextMenu && contextMenu.type !== 'folder';
+    const contextTargetStudent = isContactMenu ? classStudents.find(s => s.id === contextMenu.studentId) : null;
+    const contextMenuTargets = isContactMenu
         ? (contextTargetStudent && selectedStudents.includes(contextTargetStudent.id) && selectedStudents.length > 1
             ? selectedStudents
             : [contextMenu.studentId])
         : [];
+    // Folder context menu: the sidebar folder that was right-clicked
+    const contextTargetFolder = contextMenu && contextMenu.type === 'folder'
+        ? data.folders.find(f => f.id === contextMenu.folderId)
+        : null;
     const contextMenuDeleteLabel = contextMenuTargets.length > 1
         ? `Delete ${contextMenuTargets.length} Contacts`
         : 'Delete Contact';
+
+    // One folder block (row + its collapsible group list), shared by the
+    // Pinned section and the Groups section so both behave identically.
+    const renderFolderBlock = (folder) => {
+        const isOpen = !!expandedFolders[folder.id];
+        const groupCount = data.classes.filter(c => c.folderId === folder.id && (showArchived ? true : !c.isArchived)).length;
+        return (
+            <div key={folder.id} className="space-y-1">
+                <div
+                    className={`group flex items-center justify-between p-2 rounded-md cursor-pointer transition-all duration-200 ${activeFolderId === folder.id
+                        ? (isDark ? 'bg-[#3a373a] font-semibold text-white' : 'bg-[#e1d5e3]/65 font-semibold text-[#2d2a2e]')
+                        : (isDark ? 'hover:bg-[#3a373a]/30' : 'hover:bg-[#e1d5e3]/30')
+                        }`}
+                    onClick={() => toggleFolder(folder.id)}
+                    onContextMenu={(e) => openFolderContextMenu(e, folder.id)}
+                >
+                    <div className="flex items-center gap-2 text-sm truncate flex-1">
+                        <ChevronDown
+                            size={14}
+                            className={`transition-transform duration-200 text-gray-400 shrink-0 ${isOpen ? 'rotate-0' : '-rotate-90'
+                                }`}
+                        />
+                        {isOpen ? (
+                            <FolderOpen size={16} className={`shrink-0 ${activeFolderId === folder.id ? 'text-[#ff6188]' : 'text-gray-400'}`} />
+                        ) : (
+                            <Folder size={16} className={`shrink-0 ${activeFolderId === folder.id ? 'text-[#ff6188]' : 'text-gray-400'}`} />
+                        )}
+                        <span className="truncate max-w-[140px]" title={folder.name}>{folder.name}</span>
+                        {folder.isArchived && <span className="text-[10px] bg-[#fc9867]/20 text-[#fc9867] border border-[#fc9867]/30 px-1.5 py-0.5 rounded font-bold shrink-0">Archive</span>}
+                        {folder.isPinned && <Pin size={11} className="text-[#ffd866] shrink-0" aria-label="Pinned" />}
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <span className={`text-xs px-2 py-0.5 rounded-full font-bold ml-auto group-hover:hidden transition-all duration-200 ${isDark ? 'bg-zinc-800 text-[#ff6188]' : 'bg-[#e1d5e3] text-[#e0466a]'
+                            }`}>
+                            {groupCount}
+                        </span>
+                        <div className="hidden group-hover:flex items-center gap-1 transition-all">
+                            <button onClick={(e) => { e.stopPropagation(); togglePinFolder(folder.id); }} className="p-1 text-gray-400 hover:text-[#ffd866] transition-colors" title={folder.isPinned ? 'Unpin folder' : 'Pin folder'}>
+                                {folder.isPinned ? <PinOff size={13} /> : <Pin size={13} />}
+                            </button>
+                            <button onClick={(e) => { e.stopPropagation(); openEditModal('folder', folder); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors"><Edit2 size={13} /></button>
+                            <button onClick={(e) => { e.stopPropagation(); toggleArchiveFolder(folder.id); }} className="p-1 text-gray-400 hover:text-[#fc9867] transition-colors"><Archive size={13} /></button>
+                            <button onClick={(e) => { e.stopPropagation(); deleteFolder(folder.id); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors"><Trash2 size={13} /></button>
+                        </div>
+                    </div>
+                </div>
+
+                <div
+                    className={`grid transition-all duration-300 ease-in-out ${isOpen ? 'grid-rows-[1fr] opacity-100 mt-1' : 'grid-rows-[0fr] opacity-0'
+                        }`}
+                >
+                    <div className="overflow-hidden">
+                        <div className="pl-6 space-y-1 pb-1">
+                            {activeClasses.filter(c => c.folderId === folder.id).map(cls => (
+                                <div
+                                    key={cls.id}
+                                    className={`group flex items-center justify-between p-2 rounded-md cursor-pointer transition-all duration-200 text-sm ${activeClassId === cls.id
+                                        ? (isDark ? 'bg-[#ab9df2]/15 text-[#ab9df2] font-semibold' : 'bg-[#ab9df2]/20 text-[#5c4cb0] font-semibold')
+                                        : (isDark ? 'hover:bg-[#3a373a]/20 text-[#939293]' : 'hover:bg-[#e1d5e3]/20 text-[#726f73]')
+                                        }`}
+                                    onClick={() => { setActiveClassId(cls.id); setSelectedStudents([]); }}
+                                >
+                                    <div className="flex items-center gap-2 truncate">
+                                        <Book size={14} className={activeClassId === cls.id ? 'text-[#ab9df2]' : 'text-gray-400'} />
+                                        <span className="truncate max-w-[120px]" title={cls.name}>{cls.name}</span>
+                                        {cls.isArchived && <span className="text-[10px] bg-[#fc9867]/20 text-[#fc9867] border border-[#fc9867]/30 px-1.5 py-0.5 rounded font-bold">Archive</span>}
+                                    </div>
+                                    <div className="hidden group-hover:flex items-center gap-1">
+                                        <button onClick={(e) => { e.stopPropagation(); openEditModal('class', cls); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors"><Edit2 size={13} /></button>
+                                        <button onClick={(e) => { e.stopPropagation(); toggleArchiveClass(cls.id); }} className="p-1 text-gray-400 hover:text-[#fc9867] transition-colors"><Archive size={13} /></button>
+                                        <button onClick={(e) => { e.stopPropagation(); deleteClass(cls.id); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors"><Trash2 size={13} /></button>
+                                    </div>
+                                </div>
+                            ))}
+                            <button
+                                onClick={() => { setEditingItem(null); setModals({ ...modals, class: true }); }}
+                                className="flex items-center gap-2 text-xs text-gray-500 hover:text-blue-600 p-2 w-full text-left transition-colors font-semibold"
+                            >
+                                <Plus size={14} /> Add Group
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        );
+    };
 
     return (
         <div className={`flex h-screen font-sans relative overflow-hidden transition-colors duration-300 ${sidebarOpen ? '' : 'sidebar-closed'} ${themeClasses.appBg}`}>
@@ -2518,13 +2641,6 @@ export default function App() {
                 </div>
 
                 <div className={`p-4 flex flex-col gap-2 border-b transition-colors duration-300 ${isDark ? 'border-[#4a474a]/40' : 'border-[#e1d5e3]/50'}`}>
-                    <button
-                        onClick={() => setModals({ ...modals, folder: true })}
-                        className={`flex items-center justify-center gap-2 w-full py-2 rounded-lg font-semibold transition-all active:scale-[0.98] ${isDark ? 'bg-[#ff6188]/10 text-[#ff6188] hover:bg-[#ff6188]/20' : 'bg-[#e0466a]/15 text-[#e0466a] hover:bg-[#e0466a]/25'
-                            }`}
-                    >
-                        <Plus size={18} /> New Folder
-                    </button>
                     <button
                         onClick={() => setModals({ ...modals, backup: true })}
                         className={`flex items-center justify-center gap-2 w-full py-2 px-3 rounded-lg font-semibold transition-all active:scale-[0.98] ${isDark ? 'bg-[#403e41] text-[#fcfaf2] hover:bg-[#4a474a] border border-[#595559]' : 'bg-[#ffffff] text-[#2d2a2e] hover:bg-[#faf8f2] border border-[#dfd9cd]'
@@ -2566,90 +2682,79 @@ export default function App() {
                 </div>
 
                 <div className="flex-1 overflow-y-auto p-3 space-y-4">
-                    {activeFolders.length === 0 && (
-                        <div className={`text-center text-sm ${themeClasses.textMuted} mt-4`}>
-                            No folders found. Create one to get started.
-                        </div>
-                    )}
-
-                    {activeFolders.map(folder => {
-                        const isOpen = !!expandedFolders[folder.id];
-                        const groupCount = data.classes.filter(c => c.folderId === folder.id && (showArchived ? true : !c.isArchived)).length;
-                        return (
-                            <div key={folder.id} className="space-y-1">
-                                <div
-                                    className={`group flex items-center justify-between p-2 rounded-md cursor-pointer transition-all duration-200 ${activeFolderId === folder.id
-                                        ? (isDark ? 'bg-[#3a373a] font-semibold text-white' : 'bg-[#e1d5e3]/65 font-semibold text-[#2d2a2e]')
-                                        : (isDark ? 'hover:bg-[#3a373a]/30' : 'hover:bg-[#e1d5e3]/30')
-                                        }`}
-                                    onClick={() => toggleFolder(folder.id)}
-                                >
-                                    <div className="flex items-center gap-2 text-sm truncate flex-1">
-                                        <ChevronDown
-                                            size={14}
-                                            className={`transition-transform duration-200 text-gray-400 shrink-0 ${isOpen ? 'rotate-0' : '-rotate-90'
-                                                }`}
-                                        />
-                                        {isOpen ? (
-                                            <FolderOpen size={16} className={`shrink-0 ${activeFolderId === folder.id ? 'text-[#ff6188]' : 'text-gray-400'}`} />
-                                        ) : (
-                                            <Folder size={16} className={`shrink-0 ${activeFolderId === folder.id ? 'text-[#ff6188]' : 'text-gray-400'}`} />
-                                        )}
-                                        <span className="truncate max-w-[140px]" title={folder.name}>{folder.name}</span>
-                                        {folder.isArchived && <span className="text-[10px] bg-[#fc9867]/20 text-[#fc9867] border border-[#fc9867]/30 px-1.5 py-0.5 rounded font-bold shrink-0">Archive</span>}
-                                    </div>
-                                    <div className="flex items-center gap-2">
-                                        <span className={`text-xs px-2 py-0.5 rounded-full font-bold ml-auto group-hover:hidden transition-all duration-200 ${isDark ? 'bg-zinc-800 text-[#ff6188]' : 'bg-[#e1d5e3] text-[#e0466a]'
-                                            }`}>
-                                            {groupCount}
-                                        </span>
-                                        <div className="hidden group-hover:flex items-center gap-1 transition-all">
-                                            <button onClick={(e) => { e.stopPropagation(); openEditModal('folder', folder); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors"><Edit2 size={13} /></button>
-                                            <button onClick={(e) => { e.stopPropagation(); toggleArchiveFolder(folder.id); }} className="p-1 text-gray-400 hover:text-[#fc9867] transition-colors"><Archive size={13} /></button>
-                                            <button onClick={(e) => { e.stopPropagation(); deleteFolder(folder.id); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors"><Trash2 size={13} /></button>
+                    {/* --- PINNED SECTION (collapsible) --- */}
+                    <div>
+                        <button
+                            type="button"
+                            onClick={() => setPinnedOpen(open => !open)}
+                            aria-expanded={pinnedOpen}
+                            className={`flex items-center gap-1.5 w-full px-2 py-1.5 rounded-md text-[11px] font-extrabold uppercase tracking-wider transition-colors ${isDark ? 'text-[#ffd866] hover:bg-[#ffd866]/10' : 'text-[#8a6d1f] hover:bg-[#ffd866]/20'}`}
+                        >
+                            <ChevronDown
+                                size={14}
+                                className={`shrink-0 transition-transform duration-200 ${pinnedOpen ? 'rotate-0' : '-rotate-90'}`}
+                            />
+                            Pinned
+                            {pinnedFolders.length > 0 && (
+                                <span className={`ml-auto text-[10px] px-1.5 py-0.5 rounded-full font-bold ${isDark ? 'bg-[#ffd866]/15 text-[#ffd866]' : 'bg-[#ffd866]/30 text-[#8a6d1f]'}`}>
+                                    {pinnedFolders.length}
+                                </span>
+                            )}
+                        </button>
+                        <div className={`grid transition-all duration-300 ease-in-out ${pinnedOpen ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'}`}>
+                            <div className="overflow-hidden">
+                                <div className="pt-1 space-y-1">
+                                    {pinnedFolders.length === 0 ? (
+                                        <div className={`px-2 py-1.5 text-xs leading-relaxed ${themeClasses.textMuted}`}>
+                                            Nothing pinned yet. Right-click a folder (or hover it and press the pin) to list it here.
                                         </div>
-                                    </div>
-                                </div>
-
-                                <div
-                                    className={`grid transition-all duration-300 ease-in-out ${isOpen ? 'grid-rows-[1fr] opacity-100 mt-1' : 'grid-rows-[0fr] opacity-0'
-                                        }`}
-                                >
-                                    <div className="overflow-hidden">
-                                        <div className="pl-6 space-y-1 pb-1">
-                                            {activeClasses.filter(c => c.folderId === folder.id).map(cls => (
-                                                <div
-                                                    key={cls.id}
-                                                    className={`group flex items-center justify-between p-2 rounded-md cursor-pointer transition-all duration-200 text-sm ${activeClassId === cls.id
-                                                        ? (isDark ? 'bg-[#ab9df2]/15 text-[#ab9df2] font-semibold' : 'bg-[#ab9df2]/20 text-[#5c4cb0] font-semibold')
-                                                        : (isDark ? 'hover:bg-[#3a373a]/20 text-[#939293]' : 'hover:bg-[#e1d5e3]/20 text-[#726f73]')
-                                                        }`}
-                                                    onClick={() => { setActiveClassId(cls.id); setSelectedStudents([]); }}
-                                                >
-                                                    <div className="flex items-center gap-2 truncate">
-                                                        <Book size={14} className={activeClassId === cls.id ? 'text-[#ab9df2]' : 'text-gray-400'} />
-                                                        <span className="truncate max-w-[120px]" title={cls.name}>{cls.name}</span>
-                                                        {cls.isArchived && <span className="text-[10px] bg-[#fc9867]/20 text-[#fc9867] border border-[#fc9867]/30 px-1.5 py-0.5 rounded font-bold">Archive</span>}
-                                                    </div>
-                                                    <div className="hidden group-hover:flex items-center gap-1">
-                                                        <button onClick={(e) => { e.stopPropagation(); openEditModal('class', cls); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors"><Edit2 size={13} /></button>
-                                                        <button onClick={(e) => { e.stopPropagation(); toggleArchiveClass(cls.id); }} className="p-1 text-gray-400 hover:text-[#fc9867] transition-colors"><Archive size={13} /></button>
-                                                        <button onClick={(e) => { e.stopPropagation(); deleteClass(cls.id); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors"><Trash2 size={13} /></button>
-                                                    </div>
-                                                </div>
-                                            ))}
-                                            <button
-                                                onClick={() => { setEditingItem(null); setModals({ ...modals, class: true }); }}
-                                                className="flex items-center gap-2 text-xs text-gray-500 hover:text-blue-600 p-2 w-full text-left transition-colors font-semibold"
-                                            >
-                                                <Plus size={14} /> Add Group
-                                            </button>
-                                        </div>
-                                    </div>
+                                    ) : (
+                                        pinnedFolders.map(renderFolderBlock)
+                                    )}
                                 </div>
                             </div>
-                        );
-                    })}
+                        </div>
+                    </div>
+
+                    {/* --- GROUPS SECTION (collapsible; "+" adds a folder) --- */}
+                    <div>
+                        <div className="flex items-center gap-1">
+                            <button
+                                type="button"
+                                onClick={() => setGroupsOpen(open => !open)}
+                                aria-expanded={groupsOpen}
+                                className={`flex items-center gap-1.5 flex-1 min-w-0 px-2 py-1.5 rounded-md text-[11px] font-extrabold uppercase tracking-wider transition-colors ${isDark ? 'text-[#78dce8] hover:bg-[#78dce8]/10' : 'text-[#13677a] hover:bg-[#78dce8]/15'}`}
+                            >
+                                <ChevronDown
+                                    size={14}
+                                    className={`shrink-0 transition-transform duration-200 ${groupsOpen ? 'rotate-0' : '-rotate-90'}`}
+                                />
+                                Groups
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => { setEditingItem(null); setModals({ ...modals, folder: true }); }}
+                                title="New Folder"
+                                aria-label="New Folder"
+                                className={`p-1.5 rounded-md transition-all active:scale-90 ${isDark ? 'text-[#ff6188] hover:bg-[#ff6188]/15' : 'text-[#e0466a] hover:bg-[#e0466a]/15'}`}
+                            >
+                                <Plus size={15} />
+                            </button>
+                        </div>
+                        <div className={`grid transition-all duration-300 ease-in-out ${groupsOpen ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'}`}>
+                            <div className="overflow-hidden">
+                                <div className="pt-1 space-y-1">
+                                    {activeFolders.length === 0 ? (
+                                        <div className={`px-2 py-1.5 text-xs leading-relaxed ${themeClasses.textMuted}`}>
+                                            No folders yet. Press + to create one.
+                                        </div>
+                                    ) : (
+                                        activeFolders.map(renderFolderBlock)
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
                 <div className={`p-3 border-t text-xs flex justify-between items-center ${isDark ? 'bg-zinc-900 border-[#4a474a]' : 'bg-[#e4d6eb] border-[#e1d5e3] text-[#726f73]'}`}>
                     <label className="flex items-center gap-2 cursor-pointer font-medium">
@@ -3663,8 +3768,68 @@ export default function App() {
             )}
 
 
+            {/* --- FOLDER ROW CONTEXT MENU (Right-click) --- */}
+            {contextMenu && contextMenu.type === 'folder' && contextTargetFolder && (
+                <div
+                    className={`fixed z-[110] min-w-[196px] rounded-xl border shadow-2xl py-1.5 overflow-hidden animate-in fade-in zoom-in-95 duration-100 ${themeClasses.cardBg}`}
+                    style={{ left: contextMenu.x, top: contextMenu.y }}
+                    onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                    onClick={(e) => e.stopPropagation()}
+                >
+                    <div className={`px-3 pt-1.5 pb-2 border-b ${themeClasses.border}`}>
+                        <p className={`text-xs font-extrabold truncate ${themeClasses.textPrimary}`}>{contextTargetFolder.name}</p>
+                        <p className={`text-[10px] font-semibold ${themeClasses.textMuted}`}>
+                            {contextTargetFolder.isPinned ? 'Pinned folder' : 'Folder'}
+                        </p>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={() => {
+                            setContextMenu(null);
+                            togglePinFolder(contextTargetFolder.id);
+                        }}
+                        className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm font-semibold text-left transition-colors ${isDark ? 'hover:bg-[#4a474a] text-[#fcfaf2]' : 'hover:bg-[#f2ece0] text-[#2d2a2e]'}`}
+                    >
+                        {contextTargetFolder.isPinned ? <PinOff size={14} className="shrink-0" /> : <Pin size={14} className="shrink-0" />}
+                        {contextTargetFolder.isPinned ? 'Unpin Folder' : 'Pin Folder'}
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => {
+                            setContextMenu(null);
+                            openEditModal('folder', contextTargetFolder);
+                        }}
+                        className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm font-semibold text-left transition-colors ${isDark ? 'hover:bg-[#4a474a] text-[#fcfaf2]' : 'hover:bg-[#f2ece0] text-[#2d2a2e]'}`}
+                    >
+                        <Edit2 size={14} className="shrink-0" /> Edit Folder
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => {
+                            setContextMenu(null);
+                            toggleArchiveFolder(contextTargetFolder.id);
+                        }}
+                        className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm font-semibold text-left transition-colors ${isDark ? 'hover:bg-[#4a474a] text-[#fcfaf2]' : 'hover:bg-[#f2ece0] text-[#2d2a2e]'}`}
+                    >
+                        <Archive size={14} className="shrink-0" /> {contextTargetFolder.isArchived ? 'Unarchive Folder' : 'Archive Folder'}
+                    </button>
+                    <div className={`my-1 border-t ${themeClasses.border}`} />
+                    <button
+                        type="button"
+                        onClick={() => {
+                            const folderId = contextTargetFolder.id;
+                            setContextMenu(null);
+                            deleteFolder(folderId);
+                        }}
+                        className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm font-bold text-left transition-colors ${isDark ? 'hover:bg-[#ff6188]/20 text-[#ff6188]' : 'hover:bg-[#e0466a]/10 text-[#e0466a]'}`}
+                    >
+                        <Trash2 size={14} className="shrink-0" /> Delete Folder
+                    </button>
+                </div>
+            )}
+
             {/* --- CONTACT ROW CONTEXT MENU (Right-click) --- */}
-            {contextMenu && (
+            {contextMenu && contextMenu.type !== 'folder' && (
                 <div
                     className={`fixed z-[110] min-w-[196px] rounded-xl border shadow-2xl py-1.5 overflow-hidden animate-in fade-in zoom-in-95 duration-100 ${themeClasses.cardBg}`}
                     style={{ left: contextMenu.x, top: contextMenu.y }}

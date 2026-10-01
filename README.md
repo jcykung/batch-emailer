@@ -23,6 +23,7 @@ Organize contacts into folders and groups, compose messages, and send batch emai
 
 ### 📁 Organize
 - **Folders & Groups** — Nest contact groups inside folders for clean hierarchical organization
+- **Pinned Folders** — Pin a folder (pin button on hover, or right-click → Pin) to keep it in the sidebar's collapsible **Pinned** section; the **Groups** section (also collapsible) holds the full folder tree and its **+** button adds a new folder
 - **Archive & Restore** — Soft-archive folders and groups without losing data
 - **Collapsible Sidebar** — Responsive navigation that auto-collapses on mobile
 
@@ -102,12 +103,13 @@ npm run preview   # Preview the production build locally
 ### Verify
 
 ```bash
-npm run verify            # both suites
+npm run verify            # all suites
 npm run verify-backup     # backup/sync files round-trip completely
 npm run verify-import     # contact import parses every supported format
+npm run verify-sidebar    # sidebar Pinned/Groups structure renders correctly
 ```
 
-`verify-backup` round-trips a realistic dataset through encrypt → write → read → verify, and confirms that missing contacts, missing **email messages** or missing settings make verification fail loudly. `verify-import` feeds the pasted formats a real user might copy (Docs tables, stacks of names and emails, CSV with quoted commas) through the parser. Run both after touching the backup or import code.
+`verify-backup` round-trips a realistic dataset through encrypt → write → read → verify, and confirms that missing contacts, missing **email messages** or missing settings make verification fail loudly. `verify-import` feeds the pasted formats a real user might copy (Docs tables, stacks of names and emails, CSV with quoted commas) through the parser. `verify-sidebar` renders the app server-side to confirm the sidebar keeps its Pinned and Groups sections, that pinned folders appear in both, and that the empty states behave. Run them after touching the backup, import or sidebar code.
 
 ---
 
@@ -123,7 +125,9 @@ batch-emailer/
 │   └── favicon-*.png
 ├── scripts/
 │   ├── generate_favicons.py   # Favicon generation utility
-│   └── verify_backup_integrity.mjs  # Round-trip test for backup/sync completeness
+│   ├── verify_backup_integrity.mjs  # Round-trip test for backup/sync completeness
+│   ├── verify_contact_import.mjs    # Parser tests for every supported paste format
+│   └── verify_sidebar.mjs           # Server-rendered sidebar structure checks
 ├── src/
 │   ├── main.jsx          # React root mount
 │   ├── App.jsx           # Entire application (single-file SPA)
@@ -137,7 +141,7 @@ batch-emailer/
 
 | Step | Action |
 |------|--------|
-| **1** | Create a **Folder** (e.g. *"2025-2026 School Year"*) |
+| **1** | Create a **Folder** (e.g. *"2025-2026 School Year"*) — press the **+** beside the **Groups** sidebar heading |
 | **2** | Add a **Group** inside the folder (e.g. *"Period 1 — Algebra"*) |
 | **3** | Add **Contacts** individually, paste a bulk list, or import a CSV |
 | **4** | Select contacts → click **Draft Email** |
