@@ -111,6 +111,75 @@ try {
     assert.match(noFoldersHtml, /Press \+ to create one/, 'Groups empty state points at the + button');
     assert.match(noFoldersHtml, /Right-click a folder or group/, 'placeholder explains how to pin both kinds');
 
+    // --- Order is part of the data (drag & drop reordering) ----------------
+    const { getCanonicalData } = await import(outfileUrl.href);
+    const orderSeed = [
+        { id: 'f1', name: 'A', isArchived: false, isPinned: false, createdAt: '2026-01-01T00:00:00.000Z' },
+        { id: 'f2', name: 'B', isArchived: false, isPinned: false, createdAt: '2026-01-02T00:00:00.000Z' }
+    ];
+    const asGiven = JSON.stringify(getCanonicalData({ folders: orderSeed, classes: [], students: [] }));
+    const asReordered = JSON.stringify(getCanonicalData({ folders: [...orderSeed].reverse(), classes: [], students: [] }));
+    assert.notStrictEqual(asGiven, asReordered, 'reordering folders changes the canonical data (so sync sees it)');
+    const groupsAsGiven = JSON.stringify(getCanonicalData({ folders: [], classes: [
+        { id: 'g1', folderId: 'f1', name: 'One' },
+        { id: 'g2', folderId: 'f1', name: 'Two' }
+    ], students: [] }));
+    const groupsReordered = JSON.stringify(getCanonicalData({ folders: [], classes: [
+        { id: 'g2', folderId: 'f1', name: 'Two' },
+        { id: 'g1', folderId: 'f1', name: 'One' }
+    ], students: [] }));
+    assert.notStrictEqual(groupsAsGiven, groupsReordered, 'reordering groups changes the canonical data too');
+    const sortedStudents = getCanonicalData({ folders: [], classes: [], students: [
+        { id: 's2', name: 'B', emails: [], emailHistory: [] },
+        { id: 's1', name: 'A', emails: [], emailHistory: [] }
+    ] }).students.map(s => s.id).join(',');
+    assert.strictEqual(sortedStudents, 's1,s2', 'contacts stay id-sorted: they have no user order');
+
+    // --- Drag & drop ordering math ----------------------------------------
+    const { moveItemInList, moveGroupToFolder, moveGroupBesideGroup } = await import(outfileUrl.href);
+    const ids = list => list.map(i => i.id).join(',');
+    const folderList = [{ id: 'f1' }, { id: 'f2' }, { id: 'f3' }];
+    assert.strictEqual(ids(moveItemInList(folderList, 'f3', 'f1', true)), 'f1,f3,f2', 'folder dropped after another lands beside it');
+    assert.strictEqual(ids(moveItemInList(folderList, 'f1', 'f3', false)), 'f2,f1,f3', 'folder dropped before another moves up');
+    assert.strictEqual(ids(moveItemInList(folderList, 'f2', 'f2', true)), 'f1,f2,f3', 'dropping a folder on itself changes nothing');
+    assert.strictEqual(ids(folderList), 'f1,f2,f3', 'the folder list itself is never mutated');
+
+    const groupList = [
+        { id: 'g1', folderId: 'f1' },
+        { id: 'g2', folderId: 'f1' },
+        { id: 'g3', folderId: 'f2' }
+    ];
+    assert.strictEqual(ids(moveGroupToFolder(groupList, 'g3', 'f1', false)), 'g3,g1,g2', 'group dropped on a folder joins at its top');
+    assert.strictEqual(ids(moveGroupToFolder(groupList, 'g1', 'f2', true)), 'g2,g3,g1', 'group dropped after a folder joins at its bottom');
+    assert.strictEqual(moveGroupToFolder(groupList, 'g1', 'f2', false)[1].folderId, 'f2', 'moving into a folder rewrites its folderId');
+    assert.strictEqual(ids(moveGroupBesideGroup(groupList, 'g1', 'g2', true)), 'g2,g1,g3', 'group dropped next to a group lands beside it');
+    assert.strictEqual(moveGroupBesideGroup(groupList, 'g3', 'g2', false)[1].folderId, 'f1', 'a group dropped on a group joins that folder');
+    assert.strictEqual(ids(groupList), 'g1,g2,g3', 'the group list itself is never mutated');
+
+    // --- Order-only sync differences are explained -------------------------
+    const { generateDataFingerprint, compareFingerprints } = await import(outfileUrl.href);
+    const orderA = { folders: orderSeed, classes: [{ id: 'g1', folderId: 'f1', name: 'One' }], students: [] };
+    const orderB = { folders: [...orderSeed].reverse(), classes: [{ id: 'g1', folderId: 'f1', name: 'One' }], students: [] };
+    const orderDiff = compareFingerprints(generateDataFingerprint(orderA), generateDataFingerprint(orderB));
+    assert.ok(orderDiff.hasDifferences, 'a reorder alone is reported as a difference');
+    assert.ok(
+        orderDiff.differences.some(d => d.type === 'folderOrder'),
+        'the conflict dialog can say the folder order differs'
+    );
+    const sameOrder = compareFingerprints(
+        generateDataFingerprint(orderA),
+        generateDataFingerprint({ ...orderA, timestamp: 0 })
+    );
+    assert.strictEqual(sameOrder.hasDifferences, false, 'identical data still reports no differences');
+
+    // --- Drag & drop wiring ------------------------------------------------
+    assert.strictEqual(
+        count(pinnedHtml, 'draggable="true"'),
+        7,
+        'every folder/group row is draggable: 3 in Pinned (folder, its group, the pinned group) + 4 in Groups'
+    );
+    assert.strictEqual(count(pinnedHtml, 'draggable="false"'), 0, 'no row is excluded from dragging');
+
     console.log('✓ Sidebar structure checks passed:');
     console.log('  - Pinned + Groups sections render; the New Folder button became a + beside Groups');
     console.log('  - pinned folders and groups each appear in Pinned and in their place in the tree');

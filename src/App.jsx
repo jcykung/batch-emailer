@@ -82,6 +82,51 @@ async function parseExport(text) {
 }
 
 // --- Canonical Data Representation & Fast Hashing ---
+// --- Sidebar drag & drop ordering (pure so scripts/verify_sidebar.mjs can test it)
+
+// Reorder any list item directly before/after another: used for folders.
+function moveItemInList(list, movingId, targetId, placeAfter) {
+    const from = list.findIndex(item => item.id === movingId);
+    if (from < 0 || movingId === targetId) return list;
+    const next = [...list];
+    const [moved] = next.splice(from, 1);
+    const to = next.findIndex(item => item.id === targetId);
+    if (to < 0) return list;
+    next.splice(placeAfter ? to + 1 : to, 0, moved);
+    return next;
+}
+
+// Move a group into a folder: `atEnd` puts it at the bottom of that folder's
+// groups, otherwise at the top (or right after the folder if it has none).
+function moveGroupToFolder(classes, movingId, folderId, atEnd) {
+    const moving = classes.find(c => c.id === movingId);
+    if (!moving) return classes;
+    const rest = classes.filter(c => c.id !== movingId);
+    const inFolder = rest.filter(c => c.folderId === folderId);
+    let index;
+    if (inFolder.length === 0) {
+        index = rest.length;
+    } else {
+        const firstIdx = rest.indexOf(inFolder[0]);
+        const lastIdx = rest.indexOf(inFolder[inFolder.length - 1]);
+        index = atEnd ? lastIdx + 1 : firstIdx;
+    }
+    rest.splice(index, 0, { ...moving, folderId });
+    return rest;
+}
+
+// Drop a group next to another group: it lands in the target's folder, right
+// before or after it.
+function moveGroupBesideGroup(classes, movingId, targetId, placeAfter) {
+    const moving = classes.find(c => c.id === movingId);
+    if (!moving || movingId === targetId) return classes;
+    const rest = classes.filter(c => c.id !== movingId);
+    const idx = rest.findIndex(c => c.id === targetId);
+    if (idx < 0) return classes;
+    rest.splice(placeAfter ? idx + 1 : idx, 0, { ...moving, folderId: rest[idx].folderId });
+    return rest;
+}
+
 function getCanonicalData(folders = null, classes = null, students = null) {
     let rawFolders, rawClasses, rawStudents;
     if (folders && typeof folders === 'object' && !Array.isArray(folders)) {
@@ -94,7 +139,12 @@ function getCanonicalData(folders = null, classes = null, students = null) {
         rawStudents = students || [];
     }
 
-    const cleanFolders = [...rawFolders].sort((a, b) => (a.id || '').localeCompare(b.id || '')).map(f => ({
+    // Folders and groups deliberately keep their incoming array order: the
+    // sidebar lets the user drag them into any arrangement, and that order is
+    // real user data — it has to survive sync, backups and the change-detection
+    // hash. Contacts have no user-defined order, so they stay id-sorted for a
+    // stable hash.
+    const cleanFolders = rawFolders.map(f => ({
         id: f.id,
         name: f.name || '',
         isArchived: !!f.isArchived,
@@ -102,7 +152,7 @@ function getCanonicalData(folders = null, classes = null, students = null) {
         createdAt: f.createdAt || ''
     }));
 
-    const cleanClasses = [...rawClasses].sort((a, b) => (a.id || '').localeCompare(b.id || '')).map(c => ({
+    const cleanClasses = rawClasses.map(c => ({
         id: c.id,
         name: c.name || '',
         folderId: c.folderId || null,
@@ -298,7 +348,9 @@ export {
     describeDataSummary, countEmailMessages, mergeContactRecords, readBackupSettings,
     parseContactsFromText, buildContactRecords, parseCSV,
     IMPORT_EXAMPLE_PASTE, IMPORT_EXAMPLE_CSV,
-    buildExistingContactIndex, planContactImport
+    buildExistingContactIndex, planContactImport,
+    moveItemInList, moveGroupToFolder, moveGroupBesideGroup,
+    generateDataFingerprint, compareFingerprints
 };
 
 // Decrypts a file we just wrote and proves it still holds every folder, group,
@@ -451,7 +503,12 @@ function generateDataFingerprint(dataObj = null) {
         classCount: c.length,
         studentCount: s.length,
         classes: classSummary,
-        totalContacts: s.length
+        totalContacts: s.length,
+        // Drag & drop makes ordering real user data, so it is fingerprinted too
+        // — otherwise a pure reorder would show up as a conflict with no
+        // explainable difference.
+        folderOrder: f.map(item => item.id).join(","),
+        classOrder: c.map(item => item.id).join(",")
     };
 }
 
@@ -516,6 +573,23 @@ function compareFingerprints(localFP, fileFP) {
         differences.push({
             type: "contactCount",
             description: `Contacts count differs: ${localFP.studentCount} local vs ${fileFP.studentCount} in file`,
+            items: []
+        });
+    }
+
+    // Order-only differences: counts and names match, but the user arranged
+    // things differently on each side.
+    if (localFP.folderOrder !== fileFP.folderOrder) {
+        differences.push({
+            type: "folderOrder",
+            description: "Folder order differs between this device and the file",
+            items: []
+        });
+    }
+    if (localFP.classOrder !== fileFP.classOrder) {
+        differences.push({
+            type: "classOrder",
+            description: "Group order differs between this device and the file",
             items: []
         });
     }
@@ -874,6 +948,11 @@ export default function App() {
     // Sidebar sections: Pinned and Groups (both collapsible via their headers)
     const [pinnedOpen, setPinnedOpen] = useState(true);
     const [groupsOpen, setGroupsOpen] = useState(true);
+
+    // Drag & drop reordering: what is being dragged ({ kind: 'folder'|'class', id })
+    // and where it would land ({ kind, id, position: 'before'|'after' }).
+    const [dragItem, setDragItem] = useState(null);
+    const [dropTarget, setDropTarget] = useState(null);
 
     // Dynamic email inputs state for modal
     const [modalEmails, setModalEmails] = useState(['']);
@@ -1488,6 +1567,97 @@ export default function App() {
             classes: prev.classes.map(c => c.id === id ? { ...c, isPinned: !c.isPinned } : c)
         }));
         setPinnedOpen(true);
+    };
+
+    // --- Sidebar drag & drop ------------------------------------------------
+    // Folders reorder among themselves; groups reorder and can change folder by
+    // landing on a folder row (before/after decides top or bottom of it). The
+    // Pinned section mirrors the same rows, so dragging works identically there
+    // and the Groups list updates live behind it.
+    const startSidebarDrag = (kind, id) => (e) => {
+        e.dataTransfer.effectAllowed = 'move';
+        // Firefox refuses to start a drag without something in the payload.
+        e.dataTransfer.setData('text/plain', `${kind}:${id}`);
+        setDropTarget(null);
+        setDragItem({ kind, id });
+    };
+
+    const endSidebarDrag = () => {
+        setDragItem(null);
+        setDropTarget(null);
+    };
+
+    const dropPositionFor = (e) => {
+        const rect = e.currentTarget.getBoundingClientRect();
+        return e.clientY > rect.top + rect.height / 2 ? 'after' : 'before';
+    };
+
+    const overFolderRow = (e, folder) => {
+        if (!dragItem) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        const position = dropPositionFor(e);
+        setDropTarget(prev => (prev && prev.kind === 'folder' && prev.id === folder.id && prev.position === position)
+            ? prev
+            : { kind: 'folder', id: folder.id, position });
+        // Landing a group inside a folder needs the folder open to be legible.
+        if (dragItem.kind === 'class') {
+            setExpandedFolders(prev => (prev[folder.id] ? prev : { ...prev, [folder.id]: true }));
+        }
+    };
+
+    const overGroupRow = (e, cls) => {
+        // Folders have nothing to drop on inside a group's row.
+        if (!dragItem || dragItem.kind !== 'class') return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        const position = dropPositionFor(e);
+        const id = cls.id;
+        setDropTarget(prev => (prev && prev.kind === 'class' && prev.id === id && prev.position === position)
+            ? prev
+            : { kind: 'class', id, position });
+    };
+
+    const leaveDropRow = (e, kind, id) => {
+        if (e.relatedTarget && e.currentTarget.contains(e.relatedTarget)) return;
+        setDropTarget(prev => (prev && prev.kind === kind && prev.id === id ? null : prev));
+    };
+
+    const dropOnFolder = (e, targetFolder) => {
+        e.preventDefault();
+        const drag = dragItem;
+        const position = dropPositionFor(e);
+        endSidebarDrag();
+        if (!drag) return;
+
+        if (drag.kind === 'folder') {
+            if (drag.id === targetFolder.id) return;
+            setData(prev => ({
+                ...prev,
+                folders: moveItemInList(prev.folders, drag.id, targetFolder.id, position === 'after')
+            }));
+            return;
+        }
+
+        // A group dropped on a folder row joins that folder: before/after put it
+        // at the top or the bottom of that folder's groups.
+        setData(prev => ({
+            ...prev,
+            classes: moveGroupToFolder(prev.classes, drag.id, targetFolder.id, position === 'after')
+        }));
+    };
+
+    const dropOnGroup = (e, targetClass) => {
+        e.preventDefault();
+        const drag = dragItem;
+        const position = dropPositionFor(e);
+        endSidebarDrag();
+        if (!drag || drag.kind !== 'class' || drag.id === targetClass.id) return;
+
+        setData(prev => ({
+            ...prev,
+            classes: moveGroupBesideGroup(prev.classes, drag.id, targetClass.id, position === 'after')
+        }));
     };
 
     const toggleArchiveClass = (id) => {
@@ -2554,15 +2724,28 @@ export default function App() {
     // folder name shown, as a standalone entry in the Pinned section.
     const renderGroupBlock = (cls, showFolder = false) => {
         const parentFolder = showFolder ? data.folders.find(f => f.id === cls.folderId) : null;
+        const isDragged = dragItem && dragItem.kind === 'class' && dragItem.id === cls.id;
+        const isDropTarget = dropTarget && dropTarget.kind === 'class' && dropTarget.id === cls.id;
+        const dropLine = isDropTarget
+            ? (dropTarget.position === 'after'
+                ? 'shadow-[inset_0_-2px_0_0_#78dce8]'
+                : 'shadow-[inset_0_2px_0_0_#78dce8]')
+            : '';
         return (
             <div
                 key={cls.id}
-                className={`group flex items-center justify-between p-2 rounded-md cursor-pointer transition-all duration-200 text-sm ${activeClassId === cls.id
+                className={`group flex items-center justify-between p-2 rounded-md cursor-pointer select-none transition-all duration-200 text-sm ${activeClassId === cls.id
                     ? (isDark ? 'bg-[#ab9df2]/15 text-[#ab9df2] font-semibold' : 'bg-[#ab9df2]/20 text-[#5c4cb0] font-semibold')
                     : (isDark ? 'hover:bg-[#3a373a]/20 text-[#939293]' : 'hover:bg-[#e1d5e3]/20 text-[#726f73]')
-                    }`}
+                    } ${isDragged ? 'opacity-40' : ''} ${dropLine}`}
                 onClick={() => { setActiveClassId(cls.id); setSelectedStudents([]); }}
                 onContextMenu={(e) => openSidebarContextMenu(e, 'class', cls.id)}
+                draggable
+                onDragStart={startSidebarDrag('class', cls.id)}
+                onDragEnd={endSidebarDrag}
+                onDragOver={(e) => overGroupRow(e, cls)}
+                onDragLeave={(e) => leaveDropRow(e, 'class', cls.id)}
+                onDrop={(e) => dropOnGroup(e, cls)}
             >
                 <div className="flex items-center gap-2 truncate">
                     <Book size={14} className={`shrink-0 ${activeClassId === cls.id ? 'text-[#ab9df2]' : 'text-gray-400'}`} />
@@ -2595,15 +2778,28 @@ export default function App() {
     const renderFolderBlock = (folder) => {
         const isOpen = !!expandedFolders[folder.id];
         const groupCount = data.classes.filter(c => c.folderId === folder.id && (showArchived ? true : !c.isArchived)).length;
+        const isDragged = dragItem && dragItem.kind === 'folder' && dragItem.id === folder.id;
+        const isDropTarget = dropTarget && dropTarget.kind === 'folder' && dropTarget.id === folder.id;
+        const dropLine = isDropTarget
+            ? (dropTarget.position === 'after'
+                ? 'shadow-[inset_0_-2px_0_0_#78dce8]'
+                : 'shadow-[inset_0_2px_0_0_#78dce8]')
+            : '';
         return (
             <div key={folder.id} className="space-y-1">
                 <div
-                    className={`group flex items-center justify-between p-2 rounded-md cursor-pointer transition-all duration-200 ${activeFolderId === folder.id
+                    className={`group flex items-center justify-between p-2 rounded-md cursor-pointer select-none transition-all duration-200 ${activeFolderId === folder.id
                         ? (isDark ? 'bg-[#3a373a] font-semibold text-white' : 'bg-[#e1d5e3]/65 font-semibold text-[#2d2a2e]')
                         : (isDark ? 'hover:bg-[#3a373a]/30' : 'hover:bg-[#e1d5e3]/30')
-                        }`}
+                        } ${isDragged ? 'opacity-40' : ''} ${dropLine}`}
                     onClick={() => toggleFolder(folder.id)}
                     onContextMenu={(e) => openSidebarContextMenu(e, 'folder', folder.id)}
+                    draggable
+                    onDragStart={startSidebarDrag('folder', folder.id)}
+                    onDragEnd={endSidebarDrag}
+                    onDragOver={(e) => overFolderRow(e, folder)}
+                    onDragLeave={(e) => leaveDropRow(e, 'folder', folder.id)}
+                    onDrop={(e) => dropOnFolder(e, folder)}
                 >
                     <div className="flex items-center gap-2 text-sm truncate flex-1">
                         <ChevronDown
