@@ -9,6 +9,7 @@
 //   3. verification FAILS if the contacts array is missing
 //   4. importing keeps every field (including log subjects)
 //   5. "Import New Items Only" merging never discards a message
+//   6. drag & drop order and subfolder nesting survive the file and its hash
 
 import { build } from 'esbuild';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -55,7 +56,8 @@ try {
     const {
         encryptExport, parseExport, normalizeImportedData,
         buildBackupPayload, verifyBackupRoundTrip, getDataSummary,
-        describeDataSummary, countEmailMessages, mergeContactRecords
+        describeDataSummary, countEmailMessages, mergeContactRecords,
+        getCanonicalData
     } = app;
 
     // --- A realistic dataset, including legacy fields and log subjects -------
@@ -178,6 +180,53 @@ try {
     const localOnly = mergeContactRecords(local, { ...file, emailHistory: [] });
     assert.equal(localOnly.emailHistory.length, 1, 'an empty file history cannot erase local messages');
 
+    // --- 6. Drag & drop order and subfolder nesting survive the file --------
+    // The sidebar lets the user arrange folders and groups freely (and file a
+    // folder inside another one). That arrangement lives in the array order
+    // plus `parentId`, so the file has to write it back verbatim — a sort
+    // anywhere in the pipeline would erase the layout on the next restore.
+    const arranged = {
+        folders: [
+            { id: 'f2', name: 'Clubs', isArchived: true, parentId: null, createdAt: '2026-01-02T00:00:00.000Z' },
+            { id: 'f4', name: 'Chess club', isArchived: false, parentId: 'f2', createdAt: '2026-01-06T00:00:00.000Z' },
+            { id: 'f1', name: 'Homeroom', isArchived: false, parentId: null, createdAt: '2026-01-01T00:00:00.000Z' }
+        ],
+        classes: [
+            { id: 'g3', folderId: null, name: 'Loose contacts', isArchived: false, createdAt: '2026-01-05T00:00:00.000Z' },
+            { id: 'g1', folderId: 'f4', name: 'Period 1', isArchived: false, createdAt: '2026-01-03T00:00:00.000Z' },
+            { id: 'g2', folderId: 'f2', name: 'Chess', isArchived: false, createdAt: '2026-01-04T00:00:00.000Z' }
+        ],
+        students: dataset.students
+    };
+
+    const arrangedPayload = await buildBackupPayload(arranged, 8);
+    const arrangedJson = await encryptExport(arrangedPayload);
+    const arrangedBack = normalizeImportedData(await parseExport(arrangedJson));
+    assert.deepEqual(arrangedBack.folders.map(f => f.id), ['f2', 'f4', 'f1'],
+        'folder order as dragged is written to the file and read back unchanged');
+    assert.deepEqual(arrangedBack.classes.map(c => c.id), ['g3', 'g1', 'g2'],
+        'group order as dragged is written to the file and read back unchanged');
+    assert.equal(arrangedBack.folders[1].parentId, 'f2', 'subfolder nesting travels in the file');
+    assert.equal(arrangedBack.folders[0].parentId, null, 'a top-level folder stays top level');
+    await verifyBackupRoundTrip(arrangedJson, arranged, arrangedPayload.settings);
+    assert.equal(
+        describeDataSummary(arranged),
+        describeDataSummary(normalizeImportedData(await parseExport(await encryptExport(
+            await buildBackupPayload(arranged, 9)
+        )))),
+        'summary still matches after a reorder round-trip'
+    );
+
+    // The content hash has to see the arrangement too, otherwise a reorder
+    // would never mark the data dirty and would never reach the other device.
+    const arrangedHash = JSON.stringify(getCanonicalData(arranged));
+    const reshuffled = { ...arranged, folders: [...arranged.folders].reverse(), classes: [...arranged.classes].reverse() };
+    assert.notEqual(JSON.stringify(getCanonicalData(reshuffled)), arrangedHash,
+        'reordering folders or groups changes the content hash');
+    const reparented = { ...arranged, folders: arranged.folders.map(f => (f.id === 'f4' ? { ...f, parentId: 'f1' } : f)) };
+    assert.notEqual(JSON.stringify(getCanonicalData(reparented)), arrangedHash,
+        'moving a subfolder under a different parent changes the content hash');
+
     // --- Human readable summary ---------------------------------------------
     const line = describeDataSummary(dataset);
     assert.match(line, /2 folders, 3 groups, 4 contacts and 3 email messages/, 'summary wording');
@@ -185,6 +234,7 @@ try {
     console.log('✓ Backup integrity checks passed:');
     console.log('  -', line);
     console.log('  - round-trip verification, missing-data detection and history merging all behave');
+    console.log('  - drag & drop order and subfolder nesting survive the file and its hash');
 } finally {
     await rm(outDir, { recursive: true, force: true });
 }

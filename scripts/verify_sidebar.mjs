@@ -5,7 +5,7 @@
 import { build } from 'esbuild';
 import assert from 'node:assert';
 import { fileURLToPath } from 'node:url';
-import { rmSync } from 'node:fs';
+import { rmSync, readFileSync } from 'node:fs';
 
 const store = new Map();
 const fakeStorage = {
@@ -111,6 +111,24 @@ try {
     assert.match(noFoldersHtml, /Press \+ to create one/, 'Groups empty state points at the + button');
     assert.match(noFoldersHtml, /Right-click a folder or group/, 'placeholder explains how to pin both kinds');
 
+    // --- Subfolders (right-click a folder → Add Subfolder) -----------------
+    seed([
+        { id: 'f1', name: 'Year One', isArchived: false, isPinned: true, createdAt: '2026-01-01T00:00:00.000Z' },
+        { id: 'f2', name: 'Term A', isArchived: false, isPinned: false, parentId: 'f1', createdAt: '2026-01-02T00:00:00.000Z' },
+        { id: 'f3', name: 'Loose', isArchived: false, isPinned: false, createdAt: '2026-01-03T00:00:00.000Z' }
+    ], [
+        { id: 'g1', folderId: 'f2', name: 'Sub Class', isArchived: false, isPinned: false, createdAt: '2026-01-04T00:00:00.000Z' }
+    ]);
+    const subHtml = renderToString(React.createElement(App));
+    assert.strictEqual(
+        count(subHtml, 'title="Term A"'),
+        2,
+        'a subfolder renders inside its parent wherever that parent is listed (Pinned + Groups)'
+    );
+    assert.strictEqual(count(subHtml, 'title="Loose"'), 1, 'a top-level folder stays at the top level');
+    assert.strictEqual(count(subHtml, 'title="Sub Class"'), 2, 'a group inside a subfolder renders with it');
+    assert.strictEqual(count(subHtml, 'title="Add subfolder"'), 5, 'every folder row offers Add subfolder on hover');
+
     // --- Order is part of the data (drag & drop reordering) ----------------
     const { getCanonicalData } = await import(outfileUrl.href);
     const orderSeed = [
@@ -134,6 +152,15 @@ try {
         { id: 's1', name: 'A', emails: [], emailHistory: [] }
     ] }).students.map(s => s.id).join(',');
     assert.strictEqual(sortedStudents, 's1,s2', 'contacts stay id-sorted: they have no user order');
+    const nestedA = JSON.stringify(getCanonicalData({
+        folders: [{ id: 'f1', name: 'A' }, { id: 'f2', name: 'B', parentId: 'f1' }],
+        classes: [], students: []
+    }));
+    const nestedB = JSON.stringify(getCanonicalData({
+        folders: [{ id: 'f1', name: 'A' }, { id: 'f2', name: 'B', parentId: null }],
+        classes: [], students: []
+    }));
+    assert.notStrictEqual(nestedA, nestedB, 'subfolder nesting is part of the synced data');
 
     // --- Drag & drop ordering math ----------------------------------------
     const { moveItemInList, moveGroupToFolder, moveGroupBesideGroup } = await import(outfileUrl.href);
@@ -156,6 +183,41 @@ try {
     assert.strictEqual(moveGroupBesideGroup(groupList, 'g3', 'g2', false)[1].folderId, 'f1', 'a group dropped on a group joins that folder');
     assert.strictEqual(ids(groupList), 'g1,g2,g3', 'the group list itself is never mutated');
 
+    // --- Subfolder helpers --------------------------------------------------
+    const { collectSubtreeIds, isDescendantFolder, moveFolderRelative } = await import(outfileUrl.href);
+    const nested = [
+        { id: 'f1' },
+        { id: 'f2', parentId: 'f1' },
+        { id: 'f3', parentId: 'f2' },
+        { id: 'f4' }
+    ];
+    assert.strictEqual(
+        Array.from(collectSubtreeIds(nested, 'f1')).sort().join(','),
+        'f1,f2,f3',
+        'deleting a folder collects its whole subtree'
+    );
+    assert.ok(isDescendantFolder(nested, 'f1', 'f3'), 'a grandchild counts as inside the folder');
+    assert.ok(!isDescendantFolder(nested, 'f1', 'f4'), 'an unrelated folder is not inside it');
+    assert.strictEqual(
+        ids(moveFolderRelative(nested, 'f4', 'f2', false)),
+        'f1,f4,f2,f3',
+        'dropping a folder on a subfolder lifts it to that subfolder\'s level'
+    );
+    assert.strictEqual(moveFolderRelative(nested, 'f4', 'f2', false)[1].parentId, 'f1', 'and it adopts the subfolder\'s parent');
+    assert.strictEqual(
+        ids(moveFolderRelative(nested, 'f1', 'f3', true)),
+        'f1,f2,f3,f4',
+        'a folder can never be dropped inside its own subtree'
+    );
+    assert.strictEqual(
+        ids(moveFolderRelative(nested, 'f2', 'f2', false)),
+        'f1,f2,f3,f4',
+        'dropping a folder on itself changes nothing'
+    );
+    assert.strictEqual(ids(nested), 'f1,f2,f3,f4', 'the nested folder list is never mutated');
+    const cyclic = [{ id: 'f1', parentId: 'f2' }, { id: 'f2', parentId: 'f1' }];
+    assert.strictEqual(collectSubtreeIds(cyclic, 'f1').size, 2, 'a corrupt folder cycle cannot hang the app');
+
     // --- Order-only sync differences are explained -------------------------
     const { generateDataFingerprint, compareFingerprints } = await import(outfileUrl.href);
     const orderA = { folders: orderSeed, classes: [{ id: 'g1', folderId: 'f1', name: 'One' }], students: [] };
@@ -172,6 +234,15 @@ try {
     );
     assert.strictEqual(sameOrder.hasDifferences, false, 'identical data still reports no differences');
 
+    const nestedDiff = compareFingerprints(
+        generateDataFingerprint({ folders: orderSeed, classes: [], students: [] }),
+        generateDataFingerprint({ folders: orderSeed.map(f => (f.id === 'f2' ? { ...f, parentId: 'f1' } : f)), classes: [], students: [] })
+    );
+    assert.ok(
+        nestedDiff.differences.some(d => d.type === 'folderNesting'),
+        'the conflict dialog can say the subfolder nesting differs'
+    );
+
     // --- Drag & drop wiring ------------------------------------------------
     assert.strictEqual(
         count(pinnedHtml, 'draggable="true"'),
@@ -180,10 +251,21 @@ try {
     );
     assert.strictEqual(count(pinnedHtml, 'draggable="false"'), 0, 'no row is excluded from dragging');
 
+    // --- Right-click menus (folder + group) --------------------------------
+    // Event handlers never reach SSR, so check the shipped bundle for the menu
+    // entries the context menus build.
+    const bundleSource = readFileSync(fileURLToPath(outfileUrl), 'utf8');
+    for (const label of [
+        'Pin Folder', 'Add Subfolder', 'Rename Folder', 'Archive Folder', 'Delete Folder',
+        'Pin Group', 'Rename Group', 'Archive Group', 'Delete Group'
+    ]) {
+        assert.ok(bundleSource.includes(label), `right-click menu offers "${label}"`);
+    }
     console.log('✓ Sidebar structure checks passed:');
     console.log('  - Pinned + Groups sections render; the New Folder button became a + beside Groups');
     console.log('  - pinned folders and groups each appear in Pinned and in their place in the tree');
     console.log('  - divider arrow replaces the hamburger and the empty states read correctly');
+    console.log('  - subfolders nest, drag & drop ordering is hash-visible and the menus offer rename/add/delete');
 } finally {
     rmSync(fileURLToPath(outfileUrl), { force: true });
 }

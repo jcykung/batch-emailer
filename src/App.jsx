@@ -5,7 +5,7 @@ import {
     Copy, ExternalLink, RefreshCw, FolderOpen, MoreVertical,
     ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Clock, History, Trash, Printer, FileSpreadsheet,
     Sun, Moon, Sparkles, Coffee, AlertTriangle, CheckCircle2, Cloud, CloudOff,
-    Pin, PinOff
+    Pin, PinOff, FolderPlus
 } from 'lucide-react';
 import { getSyncHandle, setSyncHandle, clearSyncHandle, putAutoBackup } from './syncStorage.js';
 
@@ -127,6 +127,45 @@ function moveGroupBesideGroup(classes, movingId, targetId, placeAfter) {
     return rest;
 }
 
+// --- Subfolders (folders may nest) ------------------------------------------
+
+// Every folder id under `rootId`, root included — walked instead of recursed
+// so a corrupt file with a cycle in it can never hang the app.
+function collectSubtreeIds(folders, rootId) {
+    const ids = new Set([rootId]);
+    let grew = true;
+    while (grew) {
+        grew = false;
+        for (const folder of folders) {
+            if (folder.parentId && ids.has(folder.parentId) && !ids.has(folder.id)) {
+                ids.add(folder.id);
+                grew = true;
+            }
+        }
+    }
+    return ids;
+}
+
+// Is `maybeChildId` the folder itself or somewhere inside it?
+function isDescendantFolder(folders, ancestorId, maybeChildId) {
+    return collectSubtreeIds(folders, ancestorId).has(maybeChildId);
+}
+
+// Dropping folder A on folder B puts A right before/after B — and, because B
+// chose where A lands, A also joins B's parent (dropping on a subfolder lifts
+// the folder one level down). Dropping a folder inside its own subtree would
+// orphan the whole branch, so that is refused.
+function moveFolderRelative(folders, movingId, targetId, placeAfter) {
+    const moving = folders.find(f => f.id === movingId);
+    const target = folders.find(f => f.id === targetId);
+    if (!moving || !target || movingId === targetId) return folders;
+    if (isDescendantFolder(folders, movingId, targetId)) return folders;
+    const parentId = target.parentId || null;
+    const next = moveItemInList(folders, movingId, targetId, placeAfter);
+    if (next === folders || (moving.parentId || null) === parentId) return next;
+    return next.map(f => (f.id === movingId ? { ...f, parentId } : f));
+}
+
 function getCanonicalData(folders = null, classes = null, students = null) {
     let rawFolders, rawClasses, rawStudents;
     if (folders && typeof folders === 'object' && !Array.isArray(folders)) {
@@ -147,6 +186,9 @@ function getCanonicalData(folders = null, classes = null, students = null) {
     const cleanFolders = rawFolders.map(f => ({
         id: f.id,
         name: f.name || '',
+        // Subfolders: null means top level. Part of the hash so a folder being
+        // moved into (or out of) another folder syncs like any other edit.
+        parentId: f.parentId || null,
         isArchived: !!f.isArchived,
         isPinned: !!f.isPinned,
         createdAt: f.createdAt || ''
@@ -350,6 +392,7 @@ export {
     IMPORT_EXAMPLE_PASTE, IMPORT_EXAMPLE_CSV,
     buildExistingContactIndex, planContactImport,
     moveItemInList, moveGroupToFolder, moveGroupBesideGroup,
+    collectSubtreeIds, isDescendantFolder, moveFolderRelative,
     generateDataFingerprint, compareFingerprints
 };
 
@@ -508,7 +551,9 @@ function generateDataFingerprint(dataObj = null) {
         // — otherwise a pure reorder would show up as a conflict with no
         // explainable difference.
         folderOrder: f.map(item => item.id).join(","),
-        classOrder: c.map(item => item.id).join(",")
+        classOrder: c.map(item => item.id).join(","),
+        // …and so does which folder sits inside which (subfolders).
+        folderParents: f.map(item => `${item.id}:${item.parentId || ""}`).join(",")
     };
 }
 
@@ -547,6 +592,7 @@ function compareFingerprints(localFP, fileFP) {
             const changes = [];
             if (localItem.name !== fileItem.name) changes.push(`Name changed: "${localItem.name}" vs "${fileItem.name}"`);
             if (localItem.contactCount !== fileItem.contactCount) changes.push(`Contacts: ${localItem.contactCount} (local) vs ${fileItem.contactCount} (file)`);
+            if (localItem.folderId !== fileItem.folderId) changes.push('moved to a different folder');
             if (changes.length > 0) {
                 modified.push({ name: localItem.name, changes });
             }
@@ -590,6 +636,13 @@ function compareFingerprints(localFP, fileFP) {
         differences.push({
             type: "classOrder",
             description: "Group order differs between this device and the file",
+            items: []
+        });
+    }
+    if (localFP.folderParents !== fileFP.folderParents) {
+        differences.push({
+            type: "folderNesting",
+            description: "Subfolder nesting differs between this device and the file",
             items: []
         });
     }
@@ -939,6 +992,12 @@ export default function App() {
 
     // Edit states
     const [editingItem, setEditingItem] = useState(null);
+    // Which folder the *next* New Folder dialog should nest under (set by
+    // right-click → Add Subfolder; '' = top level). Only used when creating.
+    const [folderModalParentId, setFolderModalParentId] = useState('');
+    // Which folder the *next* New Group dialog should file into (set by a
+    // folder's "Add Group" button; '' = fall back to the selected folder).
+    const [classModalFolderId, setClassModalFolderId] = useState('');
     const [selectedStudents, setSelectedStudents] = useState([]);
     const [lastSelectedStudentId, setLastSelectedStudentId] = useState(null);
 
@@ -1201,7 +1260,34 @@ export default function App() {
 
     // Data helpers
     const activeFolders = data.folders.filter(f => showArchived ? true : !f.isArchived);
+    // The Groups section starts at the top level; subfolders render inside
+    // their parent's block instead of out here. A folder whose parent no
+    // longer exists (hand-edited file) is treated as top level so it can never
+    // disappear from the sidebar.
+    const rootFolders = activeFolders.filter(f => !f.parentId || !data.folders.some(p => p.id === f.parentId));
     const pinnedFolders = activeFolders.filter(f => f.isPinned);
+    // Parent picker for the folder dialog: never offer the folder being edited
+    // or anything inside it (that would file it under its own subtree).
+    const folderParentOptions = (() => {
+        if (!modals.folder || !editingItem) return data.folders;
+        const excluded = collectSubtreeIds(data.folders, editingItem.id);
+        return data.folders.filter(f => !excluded.has(f.id));
+    })();
+    // How far a folder sits below the top level — used to indent names in the
+    // "Parent Folder" pickers so the nesting is readable.
+    const folderDepth = (folder) => {
+        let depth = 0;
+        const seen = new Set();
+        let cursor = folder;
+        while (cursor && cursor.parentId && depth < 8 && !seen.has(cursor.id)) {
+            seen.add(cursor.id);
+            cursor = data.folders.find(f => f.id === cursor.parentId);
+            depth += 1;
+        }
+        return depth;
+    };
+    const folderOptionLabel = (f) =>
+        `${'\u00A0\u00A0'.repeat(folderDepth(f))}${f.name}${f.isArchived ? ' · archived' : ''}`;
     const activeClasses = data.classes.filter(c =>
         showArchived ? true : !c.isArchived
     );
@@ -1326,7 +1412,7 @@ export default function App() {
         e.stopPropagation();
 
         const MENU_WIDTH = 200;
-        const MENU_HEIGHT = 190;
+        const MENU_HEIGHT = 245;
         setContextMenu({
             type,
             [type === 'folder' ? 'folderId' : 'classId']: itemId,
@@ -1352,16 +1438,23 @@ export default function App() {
     const saveFolder = (e) => {
         e.preventDefault();
         const name = e.target.name.value;
+        const chosenParent = e.target.parentId ? (e.target.parentId.value || null) : null;
         if (editingItem) {
             setData(prev => ({
                 ...prev,
-                folders: prev.folders.map(f => f.id === editingItem.id ? { ...f, name } : f)
+                folders: prev.folders.map(f => f.id === editingItem.id
+                    // A folder can never be filed under itself.
+                    ? { ...f, name, parentId: f.id === chosenParent ? (f.parentId || null) : chosenParent }
+                    : f)
             }));
         } else {
-            const newFolder = { id: generateId(), name, isArchived: false, isPinned: false, createdAt: new Date().toISOString() };
+            const newFolder = { id: generateId(), name, parentId: chosenParent, isArchived: false, isPinned: false, createdAt: new Date().toISOString() };
             setData(prev => ({ ...prev, folders: [...prev.folders, newFolder] }));
             setActiveFolderId(newFolder.id);
+            // Show the new subfolder where it landed.
+            if (chosenParent) setExpandedFolders(prev => ({ ...prev, [chosenParent]: true }));
         }
+        setFolderModalParentId('');
         closeModals();
     };
 
@@ -1531,17 +1624,26 @@ export default function App() {
     };
 
     const deleteFolder = (id) => {
-        showConfirm("Delete Folder", "Are you sure you want to delete this folder? All groups and contacts within it will be lost.", () => {
-            const classesInFolder = data.classes.filter(c => c.folderId === id).map(c => c.id);
-            setData(prev => ({
-                ...prev,
-                folders: prev.folders.filter(f => f.id !== id),
-                classes: prev.classes.filter(c => c.folderId !== id),
-                students: prev.students.filter(s => !classesInFolder.includes(s.classId))
-            }));
-            if (activeFolderId === id) setActiveFolderId(null);
-            if (classesInFolder.includes(activeClassId)) setActiveClassId(null);
-        });
+        // Subfolders (and everything in them) go with the folder.
+        const subtree = collectSubtreeIds(data.folders, id);
+        const nestedCount = subtree.size - 1;
+        showConfirm(
+            "Delete Folder",
+            nestedCount > 0
+                ? `Are you sure you want to delete this folder? ${nestedCount} subfolder${nestedCount === 1 ? '' : 's'} and every group and contact within them will be lost.`
+                : "Are you sure you want to delete this folder? All groups and contacts within it will be lost.",
+            () => {
+                const classIds = new Set(data.classes.filter(c => subtree.has(c.folderId)).map(c => c.id));
+                setData(prev => ({
+                    ...prev,
+                    folders: prev.folders.filter(f => !subtree.has(f.id)),
+                    classes: prev.classes.filter(c => !classIds.has(c.id)),
+                    students: prev.students.filter(s => !classIds.has(s.classId))
+                }));
+                if (subtree.has(activeFolderId)) setActiveFolderId(null);
+                if (classIds.has(activeClassId)) setActiveClassId(null);
+            }
+        );
     };
 
     const toggleArchiveFolder = (id) => {
@@ -1594,6 +1696,12 @@ export default function App() {
 
     const overFolderRow = (e, folder) => {
         if (!dragItem) return;
+        // Never accept a folder inside its own subtree — the indicator must not
+        // promise a drop that the drop handler would refuse.
+        if (dragItem.kind === 'folder' && isDescendantFolder(data.folders, dragItem.id, folder.id)) {
+            setDropTarget(prev => (prev && prev.kind === 'folder' && prev.id === folder.id ? null : prev));
+            return;
+        }
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
         const position = dropPositionFor(e);
@@ -1634,7 +1742,7 @@ export default function App() {
             if (drag.id === targetFolder.id) return;
             setData(prev => ({
                 ...prev,
-                folders: moveItemInList(prev.folders, drag.id, targetFolder.id, position === 'after')
+                folders: moveFolderRelative(prev.folders, drag.id, targetFolder.id, position === 'after')
             }));
             return;
         }
@@ -1708,6 +1816,8 @@ export default function App() {
     const closeModals = () => {
         setModals({ folder: false, class: false, student: false, bulkAdd: false, draftEmail: false, backup: false, changelog: false, privacy: false });
         setEditingItem(null);
+        setFolderModalParentId('');
+        setClassModalFolderId('');
         setShowSyncConflictModal(false);
         setSyncConflictData(null);
         setShowRestoreChoiceModal(false);
@@ -2710,6 +2820,10 @@ export default function App() {
     const contextTargetFolder = contextMenu && contextMenu.type === 'folder'
         ? data.folders.find(f => f.id === contextMenu.folderId)
         : null;
+    // The folder a folder lives inside, for menu subtitles.
+    const folderParentOf = (folder) => (folder && folder.parentId
+        ? data.folders.find(f => f.id === folder.parentId) || null
+        : null);
     const contextTargetClass = contextMenu && contextMenu.type === 'class'
         ? data.classes.find(c => c.id === contextMenu.classId)
         : null;
@@ -2765,7 +2879,7 @@ export default function App() {
                     <button onClick={(e) => { e.stopPropagation(); togglePinClass(cls.id); }} className="p-1 text-gray-400 hover:text-[#ffd866] transition-colors" title={cls.isPinned ? 'Unpin group' : 'Pin group'}>
                         {cls.isPinned ? <PinOff size={13} /> : <Pin size={13} />}
                     </button>
-                    <button onClick={(e) => { e.stopPropagation(); openEditModal('class', cls); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors"><Edit2 size={13} /></button>
+                    <button onClick={(e) => { e.stopPropagation(); openEditModal('class', cls); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors" title="Rename group"><Edit2 size={13} /></button>
                     <button onClick={(e) => { e.stopPropagation(); toggleArchiveClass(cls.id); }} className="p-1 text-gray-400 hover:text-[#fc9867] transition-colors"><Archive size={13} /></button>
                     <button onClick={(e) => { e.stopPropagation(); deleteClass(cls.id); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors"><Trash2 size={13} /></button>
                 </div>
@@ -2773,11 +2887,16 @@ export default function App() {
         );
     };
 
-    // One folder block (row + its collapsible group list), shared by the
-    // Pinned section and the Groups section so both behave identically.
-    const renderFolderBlock = (folder) => {
+    // One folder block (row + its collapsible subfolder and group list), shared
+    // by the Pinned section and the Groups section so both behave identically.
+    // `depth` is both the recursion passed to children and a guard: a corrupt
+    // file with a folder cycle in it can only ever render 8 levels.
+    const renderFolderBlock = (folder, depth = 0) => {
         const isOpen = !!expandedFolders[folder.id];
         const groupCount = data.classes.filter(c => c.folderId === folder.id && (showArchived ? true : !c.isArchived)).length;
+        const subFolders = depth < 8
+            ? activeFolders.filter(f => f.parentId === folder.id && f.id !== folder.id)
+            : [];
         const isDragged = dragItem && dragItem.kind === 'folder' && dragItem.id === folder.id;
         const isDropTarget = dropTarget && dropTarget.kind === 'folder' && dropTarget.id === folder.id;
         const dropLine = isDropTarget
@@ -2825,7 +2944,10 @@ export default function App() {
                             <button onClick={(e) => { e.stopPropagation(); togglePinFolder(folder.id); }} className="p-1 text-gray-400 hover:text-[#ffd866] transition-colors" title={folder.isPinned ? 'Unpin folder' : 'Pin folder'}>
                                 {folder.isPinned ? <PinOff size={13} /> : <Pin size={13} />}
                             </button>
-                            <button onClick={(e) => { e.stopPropagation(); openEditModal('folder', folder); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors"><Edit2 size={13} /></button>
+                            <button onClick={(e) => { e.stopPropagation(); setEditingItem(null); setFolderModalParentId(folder.id); setModals({ ...modals, folder: true }); }} className="p-1 text-gray-400 hover:text-[#a9dc76] transition-colors" title="Add subfolder">
+                                <FolderPlus size={13} />
+                            </button>
+                            <button onClick={(e) => { e.stopPropagation(); openEditModal('folder', folder); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors" title="Rename folder"><Edit2 size={13} /></button>
                             <button onClick={(e) => { e.stopPropagation(); toggleArchiveFolder(folder.id); }} className="p-1 text-gray-400 hover:text-[#fc9867] transition-colors"><Archive size={13} /></button>
                             <button onClick={(e) => { e.stopPropagation(); deleteFolder(folder.id); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors"><Trash2 size={13} /></button>
                         </div>
@@ -2838,9 +2960,10 @@ export default function App() {
                 >
                     <div className="overflow-hidden">
                         <div className="pl-6 space-y-1 pb-1">
+                            {subFolders.map(sub => renderFolderBlock(sub, depth + 1))}
                             {activeClasses.filter(c => c.folderId === folder.id).map(cls => renderGroupBlock(cls))}
                             <button
-                                onClick={() => { setEditingItem(null); setModals({ ...modals, class: true }); }}
+                                onClick={() => { setEditingItem(null); setClassModalFolderId(folder.id); setModals({ ...modals, class: true }); }}
                                 className="flex items-center gap-2 text-xs text-gray-500 hover:text-blue-600 p-2 w-full text-left transition-colors font-semibold"
                             >
                                 <Plus size={14} /> Add Group
@@ -2943,7 +3066,7 @@ export default function App() {
                                         </div>
                                     ) : (
                                         <>
-                                            {pinnedFolders.map(renderFolderBlock)}
+                                            {pinnedFolders.map(f => renderFolderBlock(f, 0))}
                                             {pinnedClasses.map(cls => renderGroupBlock(cls, true))}
                                         </>
                                     )}
@@ -2969,7 +3092,7 @@ export default function App() {
                             </button>
                             <button
                                 type="button"
-                                onClick={() => { setEditingItem(null); setModals({ ...modals, folder: true }); }}
+                                onClick={() => { setEditingItem(null); setFolderModalParentId(''); setModals({ ...modals, folder: true }); }}
                                 title="New Folder"
                                 aria-label="New Folder"
                                 className={`p-1.5 rounded-md transition-all active:scale-90 ${isDark ? 'text-[#ff6188] hover:bg-[#ff6188]/15' : 'text-[#e0466a] hover:bg-[#e0466a]/15'}`}
@@ -2980,12 +3103,12 @@ export default function App() {
                         <div className={`grid transition-all duration-300 ease-in-out ${groupsOpen ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'}`}>
                             <div className="overflow-hidden">
                                 <div className="pt-1 space-y-1">
-                                    {activeFolders.length === 0 ? (
+                                    {rootFolders.length === 0 ? (
                                         <div className={`px-2 py-1.5 text-xs leading-relaxed ${themeClasses.textMuted}`}>
                                             No folders yet. Press + to create one.
                                         </div>
                                     ) : (
-                                        activeFolders.map(renderFolderBlock)
+                                        rootFolders.map(f => renderFolderBlock(f, 0))
                                     )}
                                 </div>
                             </div>
@@ -3415,8 +3538,11 @@ export default function App() {
                             <p className={`mb-6 text-sm md:text-base ${themeClasses.textMuted}`}>Privacy-compliant email drafting. Select a group from the sidebar or create a new one to start managing your contact lists safely.</p>
                             <button
                                 onClick={() => {
-                                    if (activeFolders.length === 0) setModals({ ...modals, folder: true });
-                                    else setModals({ ...modals, class: true });
+                                    if (activeFolders.length === 0) {
+                                        setEditingItem(null);
+                                        setFolderModalParentId('');
+                                        setModals({ ...modals, folder: true });
+                                    } else setModals({ ...modals, class: true });
                                 }}
                                 className={`px-6 py-2 rounded-lg font-medium transition-colors ${themeClasses.btnPrimary}`}
                             >
@@ -3442,6 +3568,22 @@ export default function App() {
                                 <label className={`block text-xs font-bold uppercase tracking-wider mb-1.5 ${isDark ? 'text-[#ff6188]/70' : 'text-[#e0466a]/70'}`}>Folder Name</label>
                                 <input required autoFocus type="text" name="name" defaultValue={editingItem?.name || ''} className={`w-full border rounded-xl p-2.5 outline-none transition-all font-medium text-sm ${themeClasses.inputBg}`} placeholder="e.g., 2026-2027 School Year" />
                             </div>
+                            <div>
+                                <label className={`block text-xs font-bold uppercase tracking-wider mb-1.5 ${isDark ? 'text-[#ff6188]/70' : 'text-[#e0466a]/70'}`}>Inside</label>
+                                <select
+                                    name="parentId"
+                                    defaultValue={editingItem ? (editingItem.parentId || '') : folderModalParentId}
+                                    className={`w-full border rounded-xl p-2.5 outline-none transition-all font-medium text-sm ${themeClasses.inputBg}`}
+                                >
+                                    <option value="" className="text-gray-800 dark:text-white dark:bg-[#3a373a]">— Top level (no parent folder) —</option>
+                                    {folderParentOptions.map(f => (
+                                        <option key={f.id} value={f.id} className="text-gray-800 dark:text-white dark:bg-[#3a373a]">{folderOptionLabel(f)}</option>
+                                    ))}
+                                </select>
+                                <p className={`text-[11px] mt-1.5 ${themeClasses.textMuted}`}>
+                                    Choose a folder to make this one a subfolder of it.
+                                </p>
+                            </div>
                             <div className="flex justify-end gap-2 pt-2">
                                 <button type="button" onClick={closeModals} className={`px-4 py-2 rounded-lg text-xs font-bold transition-all ${themeClasses.btnSecondary}`}>Cancel</button>
                                 <button type="submit" className={`px-4 py-2 rounded-lg text-xs font-bold transition-all ${themeClasses.btnPrimary}`}>Save</button>
@@ -3462,10 +3604,10 @@ export default function App() {
                         <form onSubmit={saveClass} className="p-4 space-y-4">
                             <div>
                                 <label className={`block text-xs font-bold uppercase tracking-wider mb-1.5 ${isDark ? 'text-[#ab9df2]/70' : 'text-[#5c4cb0]/70'}`}>Parent Folder</label>
-                                <select required name="folderId" defaultValue={editingItem?.folderId || activeFolderId || ''} className={`w-full border rounded-xl p-2.5 outline-none transition-all font-medium text-sm ${themeClasses.inputBg}`}>
+                                <select required name="folderId" defaultValue={editingItem?.folderId || classModalFolderId || activeFolderId || ''} className={`w-full border rounded-xl p-2.5 outline-none transition-all font-medium text-sm ${themeClasses.inputBg}`}>
                                     <option value="" disabled className="text-gray-400">Select a folder</option>
-                                    {data.folders.filter(f => !f.isArchived).map(f => (
-                                        <option key={f.id} value={f.id} className="text-gray-800 dark:text-white dark:bg-[#3a373a]">{f.name}</option>
+                                    {data.folders.filter(f => !f.isArchived || f.id === editingItem?.folderId).map(f => (
+                                        <option key={f.id} value={f.id} className="text-gray-800 dark:text-white dark:bg-[#3a373a]">{folderOptionLabel(f)}</option>
                                     ))}
                                 </select>
                             </div>
@@ -4030,8 +4172,9 @@ export default function App() {
                 >
                     <div className={`px-3 pt-1.5 pb-2 border-b ${themeClasses.border}`}>
                         <p className={`text-xs font-extrabold truncate ${themeClasses.textPrimary}`}>{contextTargetFolder.name}</p>
-                        <p className={`text-[10px] font-semibold ${themeClasses.textMuted}`}>
+                        <p className={`text-[10px] font-semibold truncate ${themeClasses.textMuted}`}>
                             {contextTargetFolder.isPinned ? 'Pinned folder' : 'Folder'}
+                            {folderParentOf(contextTargetFolder) ? ` · inside ${folderParentOf(contextTargetFolder).name}` : ''}
                         </p>
                     </div>
                     <button
@@ -4049,11 +4192,23 @@ export default function App() {
                         type="button"
                         onClick={() => {
                             setContextMenu(null);
+                            setEditingItem(null);
+                            setFolderModalParentId(contextTargetFolder.id);
+                            setModals(prev => ({ ...prev, folder: true }));
+                        }}
+                        className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm font-semibold text-left transition-colors ${isDark ? 'hover:bg-[#4a474a] text-[#fcfaf2]' : 'hover:bg-[#f2ece0] text-[#2d2a2e]'}`}
+                    >
+                        <FolderPlus size={14} className="shrink-0" /> Add Subfolder
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => {
+                            setContextMenu(null);
                             openEditModal('folder', contextTargetFolder);
                         }}
                         className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm font-semibold text-left transition-colors ${isDark ? 'hover:bg-[#4a474a] text-[#fcfaf2]' : 'hover:bg-[#f2ece0] text-[#2d2a2e]'}`}
                     >
-                        <Edit2 size={14} className="shrink-0" /> Edit Folder
+                        <Edit2 size={14} className="shrink-0" /> Rename Folder
                     </button>
                     <button
                         type="button"
@@ -4114,7 +4269,7 @@ export default function App() {
                         }}
                         className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm font-semibold text-left transition-colors ${isDark ? 'hover:bg-[#4a474a] text-[#fcfaf2]' : 'hover:bg-[#f2ece0] text-[#2d2a2e]'}`}
                     >
-                        <Edit2 size={14} className="shrink-0" /> Edit Group
+                        <Edit2 size={14} className="shrink-0" /> Rename Group
                     </button>
                     <button
                         type="button"

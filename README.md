@@ -22,10 +22,11 @@ Organize contacts into folders and groups, compose messages, and send batch emai
 <td width="50%">
 
 ### 📁 Organize
-- **Folders & Groups** — Nest contact groups inside folders for clean hierarchical organization
+- **Folders & Groups** — Nest contact groups inside folders for clean hierarchical organization, and file a folder inside another folder (**subfolders**, unlimited levels)
+- **Right-Click Everything** — Right-click a folder or a group to **Pin**, **Add Subfolder** (folders), **Rename**, **Archive** or **Delete** it — the same actions are also on the row's hover buttons
 - **Pinned Favourites** — Pin a folder *or* a group (hover → pin icon, or right-click → Pin) and it is listed in the collapsible **Pinned** section at the top of the sidebar; pinned groups show which folder they live in, and the **Groups** section (also collapsible) holds the full folder tree with a **+** button that adds a new folder
 - **Archive & Restore** — Soft-archive folders and groups without losing data
-- **Drag & Drop Ordering** — Drag folders to rearrange the folder list; drag groups to reorder them or to move them into another folder (drop on the folder row — it opens as you hover). The Pinned section mirrors the same rows, so dragging works there too and the Groups list updates live, and the new order syncs and shows up in conflict reports like any other change
+- **Drag & Drop Ordering** — Drag folders to rearrange the folder list; drag groups to reorder them or to move them into another folder (drop on the folder row — it opens as you hover). Dropping a folder on a subfolder files it at that level, and a folder can never be dropped inside its own subtree. The Pinned section mirrors the same rows, so dragging works there too and the Groups list updates live, and the new order syncs and shows up in conflict reports like any other change
 - **Collapsible Sidebar** — Responsive navigation that auto-collapses on mobile
 
 </td>
@@ -110,7 +111,7 @@ npm run verify-import     # contact import parses every supported format
 npm run verify-sidebar    # sidebar Pinned/Groups structure renders correctly
 ```
 
-`verify-backup` round-trips a realistic dataset through encrypt → write → read → verify, and confirms that missing contacts, missing **email messages** or missing settings make verification fail loudly. `verify-import` feeds the pasted formats a real user might copy (Docs tables, stacks of names and emails, CSV with quoted commas) through the parser. `verify-sidebar` renders the app server-side to confirm the sidebar keeps its Pinned and Groups sections, that pinned folders *and* groups appear both in Pinned and in their place in the tree, that the divider arrow replaced the hamburger, that folder/group **drag & drop ordering** (including order-only sync differences) behaves, and that the empty states are correct. Run them after touching the backup, import or sidebar code.
+`verify-backup` round-trips a realistic dataset through encrypt → write → read → verify, confirms that missing contacts, missing **email messages** or missing settings make verification fail loudly, and proves that **drag & drop order and subfolder nesting survive the file** (and change the content hash, so a reorder is really pushed to other devices). `verify-import` feeds the pasted formats a real user might copy (Docs tables, stacks of names and emails, CSV with quoted commas) through the parser. `verify-sidebar` renders the app server-side to confirm the sidebar keeps its Pinned and Groups sections, that pinned folders *and* groups appear both in Pinned and in their place in the tree, that subfolders nest under their parent, that the divider arrow replaced the hamburger, that folder/group **drag & drop ordering** (including order- and nesting-only sync differences) behaves, that the right-click menus offer pin/add-subfolder/rename/archive/delete, and that the empty states are correct. Run them after touching the backup, import or sidebar code.
 
 ---
 
