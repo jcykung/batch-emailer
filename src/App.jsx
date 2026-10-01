@@ -3835,12 +3835,12 @@ export default function App() {
             {/* Changelog Modal */}
             {modals.changelog && (
                 <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 backdrop-blur-xs">
-                    <div className={`rounded-2xl shadow-xl w-full max-w-md overflow-hidden border animate-in fade-in zoom-in-95 duration-200 ${themeClasses.cardBg}`}>
-                        <div className="p-4 border-b flex justify-between items-center bg-gray-50/5">
+                    <div className={`rounded-2xl shadow-xl w-full max-w-md max-h-[80vh] flex flex-col overflow-hidden border animate-in fade-in zoom-in-95 duration-200 ${themeClasses.cardBg}`}>
+                        <div className="p-4 border-b flex justify-between items-center bg-gray-50/5 shrink-0">
                             <h3 className={`font-bold text-lg ${isDark ? 'text-[#ff6188]' : 'text-[#e0466a]'}`}>Changelog</h3>
                             <button onClick={closeModals} className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-500/10 transition-colors"><X size={20} /></button>
                         </div>
-                        <div className="p-6 space-y-4">
+                        <div className="p-6 space-y-4 overflow-y-auto min-h-0">
                             <div className="space-y-2">
                                 <div className="flex items-center justify-between">
                                     <span className="text-sm font-bold text-[#a9dc76]">v1.6</span>
