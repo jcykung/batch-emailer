@@ -3158,7 +3158,7 @@ export default function App() {
                                         className="text-[10px] font-mono text-[#ab9df2] bg-[#ab9df2]/10 border border-[#ab9df2]/20 px-1.5 py-0.5 rounded cursor-pointer hover:bg-[#ab9df2]/20 hover:text-white transition-colors"
                                         title="View Changelog"
                                     >
-                                        v1.3
+                                        v1.6
                                     </span>
                                 </span>
                                 {currentClass && (
@@ -3841,6 +3841,23 @@ export default function App() {
                             <button onClick={closeModals} className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-500/10 transition-colors"><X size={20} /></button>
                         </div>
                         <div className="p-6 space-y-4">
+                            <div className="space-y-2">
+                                <div className="flex items-center justify-between">
+                                    <span className="text-sm font-bold text-[#a9dc76]">v1.6</span>
+                                    <span className="text-[10px] text-gray-500 font-mono">2026-09-30</span>
+                                </div>
+                                <ul className="list-disc pl-4 text-xs space-y-1 text-gray-600 dark:text-gray-400">
+                                    <li>The sidebar is organised into two collapsible sections: <strong>Pinned</strong> on top (with a "Nothing pinned yet" hint) and <strong>Groups</strong> below it, which holds the full folder tree. The standalone New Folder button became a <strong>+</strong> on the Groups header.</li>
+                                    <li>Pin a folder <em>or</em> a group — hover for the pin icon, or right-click → Pin — and it is listed in Pinned while staying in its place in the tree.</li>
+                                    <li>The header hamburger was replaced by an <strong>arrow handle on the divider</strong> that slides with the sidebar, on desktop and mobile.</li>
+                                    <li><strong>Drag &amp; drop:</strong> drag folders to rearrange them, drag groups to reorder them or move them into another folder (dropping on a folder row opens it as you hover), and drop a folder beside a subfolder to file it at that level. The dragged row dims, the landing row shows a cyan line, and a folder can never be dropped inside its own subtree.</li>
+                                    <li><strong>Right-click menus</strong> for folders and groups: Pin, <strong>Add Subfolder</strong> (folders), Rename, Archive and Delete — the same actions are also on each row's hover buttons.</li>
+                                    <li><strong>Subfolders</strong> at any depth: the folder dialog gained an "Inside" picker that refuses to file a folder under itself, deleting a folder takes its subfolders, groups and contacts with it, and "Add Group" now creates the group in the folder you actually clicked.</li>
+                                    <li>Folder <strong>order and nesting are real data</strong>: they travel inside backups and sync files, count towards the content hash (so a reorder really pushes to your other devices), and are named in the conflict dialog as "folder order / group order / subfolder nesting differs".</li>
+                                    <li>The sync status dot no longer lights up after a sync that the warning bar already completed.</li>
+                                    <li>Verification covers all of this: <code>npm run verify</code> now also server-renders the sidebar and round-trips a reordered, nested dataset through the backup file.</li>
+                                </ul>
+                            </div>
                             <div className="space-y-2">
                                 <div className="flex items-center justify-between">
                                     <span className="text-sm font-bold text-[#a9dc76]">v1.5</span>
