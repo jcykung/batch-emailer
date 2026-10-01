@@ -7,7 +7,7 @@
 //   1. a realistic dataset round-trips through encrypt → write → read → verify
 //   2. verification FAILS if email messages are dropped from the file
 //   3. verification FAILS if the contacts array is missing
-//   4. importing keeps every field (including log subjects)
+//   4. importing keeps every field (including log subjects and formatted HTML)
 //   5. "Import New Items Only" merging never discards a message
 
 import { build } from 'esbuild';
@@ -77,7 +77,7 @@ try {
                 timestamp: '2026-09-20T10:00:00.000Z',
                 message: 'Second message body',
                 emailHistory: [
-                    { id: 'h2', timestamp: '2026-09-20T10:00:00.000Z', subject: 'Trip reminder', message: 'Second message body' },
+                    { id: 'h2', timestamp: '2026-09-20T10:00:00.000Z', subject: 'Trip reminder', message: 'Second message body', html: '<p><strong>Second</strong> message body</p>' },
                     { id: 'h1', timestamp: '2026-09-01T09:00:00.000Z', subject: 'Welcome back', message: 'First message body' }
                 ]
             },
@@ -118,7 +118,7 @@ try {
 
     const roundTripped = normalizeImportedData(await parseExport(jsonStr));
     assert.deepEqual(roundTripped.students[0].emailHistory, dataset.students[0].emailHistory,
-        'email messages (and their subject lines) survive the file');
+        'email messages (and their subject lines and HTML) survive the file');
     assert.equal(roundTripped.students[2].emailHistory[0].message, 'Legacy body',
         'legacy message text is imported into the history');
     assert.deepEqual(roundTripped, normalizeImportedData(dataset),

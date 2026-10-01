@@ -4,9 +4,15 @@ import {
     CheckSquare, Square, X, Archive, FileText, Check, AlertCircle,
     Copy, ExternalLink, RefreshCw, FolderOpen, MoreVertical, Menu,
     ChevronDown, ChevronUp, Clock, History, Trash, Printer, FileSpreadsheet,
-    Sun, Moon, Sparkles, Coffee, AlertTriangle, CheckCircle2, Cloud, CloudOff
+    Sun, Moon, Sparkles, Coffee, AlertTriangle, CheckCircle2, Cloud, CloudOff,
+    Bold, Italic, Underline, Strikethrough, List, ListOrdered, Link, Table,
+    RemoveFormatting
 } from 'lucide-react';
 import { getSyncHandle, setSyncHandle, clearSyncHandle, putAutoBackup } from './syncStorage.js';
+import {
+    sanitizeEmailHtml, htmlToPlainText, hasRichFormatting,
+    escapeHtml, copyRichToClipboard
+} from './richText.js';
 
 // --- Utility Functions ---
 const generateId = () => crypto.randomUUID();
@@ -295,7 +301,8 @@ export {
     describeDataSummary, countEmailMessages, mergeContactRecords, readBackupSettings,
     parseContactsFromText, buildContactRecords, parseCSV,
     IMPORT_EXAMPLE_PASTE, IMPORT_EXAMPLE_CSV,
-    buildExistingContactIndex, planContactImport
+    buildExistingContactIndex, planContactImport,
+    buildComposeUrls, buildTableHtml, buildDraftHeaderHtml, DraftEmailModal
 };
 
 // Decrypts a file we just wrote and proves it still holds every folder, group,
@@ -1578,32 +1585,32 @@ export default function App() {
         const contactsHtml = classStudents.map(student => {
             const cleanEmails = (student.emails || []).filter(Boolean);
             const emailsList = cleanEmails.length > 0
-                ? cleanEmails.map(e => `<li style="margin-bottom: 2px; word-break: break-all;">${e}</li>`).join('')
+                ? cleanEmails.map(e => `<li style="margin-bottom: 2px; word-break: break-all;">${escapeHtml(e)}</li>`).join('')
                 : '<span style="color: #94a3b8; font-style: italic;">No emails</span>';
 
             const historyHtml = (student.emailHistory && student.emailHistory.length > 0)
                 ? student.emailHistory.map(log => `
             <div style="margin-bottom: 6px; padding-bottom: 4px; border-bottom: 1px dashed #e2e8f0; font-size: 10.5px;">
-              <div style="font-weight: 600; font-size: 8px; color: #94a3b8; margin-bottom: 1px;">${formatDate(log.timestamp)}</div>
-              <div style="white-space: pre-wrap; color: #0f172a; line-height: 1.35;">${log.message}</div>
+              <div style="font-weight: 600; font-size: 8px; color: #94a3b8; margin-bottom: 1px;">${escapeHtml(formatDate(log.timestamp))}</div>
+              <div style="white-space: pre-wrap; color: #0f172a; line-height: 1.35;">${escapeHtml(log.message)}</div>
             </div>
           `).join('')
                 : '<span style="color: #94a3b8; font-style: italic; font-size: 9px;">No communication history</span>';
 
             return `
         <tr style="border-bottom: 1px solid #cbd5e1; page-break-inside: avoid;">
-          <td style="padding: 6px 8px; font-weight: 500; font-size: 9.5px; color: #334155; border-right: 1px solid #cbd5e1; vertical-align: top;">${student.name}</td>
+          <td style="padding: 6px 8px; font-weight: 500; font-size: 9.5px; color: #334155; border-right: 1px solid #cbd5e1; vertical-align: top;">${escapeHtml(student.name)}</td>
           <td style="padding: 6px 8px; border-right: 1px solid #cbd5e1; font-size: 9px; color: #475569; vertical-align: top;">
             <ul style="margin: 0; padding-left: 0; list-style-type: none;">${emailsList}</ul>
           </td>
-          <td style="padding: 6px 8px; color: #475569; border-right: 1px solid #cbd5e1; font-size: 9px; vertical-align: top;">${student.notes || '-'}</td>
+          <td style="padding: 6px 8px; color: #475569; border-right: 1px solid #cbd5e1; font-size: 9px; vertical-align: top;">${escapeHtml(student.notes || '-')}</td>
           <td style="padding: 6px 8px; vertical-align: top;">${historyHtml}</td>
         </tr>
       `;
         }).join('');
 
         printContainer.innerHTML = `
-          <h1 style="margin: 0 0 2px 0; font-size: 18px; color: #e0466a; font-weight: 700; letter-spacing: -0.02em; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">${currentClass.name} - Batch Emailer</h1>
+          <h1 style="margin: 0 0 2px 0; font-size: 18px; color: #e0466a; font-weight: 700; letter-spacing: -0.02em; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">${escapeHtml(currentClass.name)} - Batch Emailer</h1>
           <h2 style="margin: 0 0 16px 0; font-size: 10px; font-weight: 500; color: #64748b; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">Generated on ${new Date().toLocaleString()} | Total Contacts: ${classStudents.length}</h2>
           <table style="width: 100%; border-collapse: collapse; margin-top: 10px; table-layout: fixed; border: 1px solid #cbd5e1; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
             <thead>
@@ -3033,9 +3040,18 @@ export default function App() {
                                                                                     Subject: {log.subject}
                                                                                 </p>
                                                                             )}
-                                                                            <p className={`text-sm whitespace-pre-wrap leading-relaxed select-all transition-colors duration-300 ${themeClasses.textPrimary}`}>
-                                                                                {log.message}
-                                                                            </p>
+                                                                            {log.html ? (
+                                                                                /* Formatted mail is rendered as it went out, on a white
+                                                                                   "email paper" card — sanitised again here because a log
+                                                                                   can also arrive from an imported or synced file. */
+                                                                                <div className="email-rich rounded-lg border border-gray-200 bg-white p-3 text-[#111111] shadow-xs">
+                                                                                    <div dangerouslySetInnerHTML={{ __html: sanitizeEmailHtml(log.html) }} />
+                                                                                </div>
+                                                                            ) : (
+                                                                                <p className={`text-sm whitespace-pre-wrap leading-relaxed select-all transition-colors duration-300 ${themeClasses.textPrimary}`}>
+                                                                                    {log.message}
+                                                                                </p>
+                                                                            )}
                                                                         </div>
                                                                     ))}
                                                                 </div>
@@ -3515,18 +3531,23 @@ export default function App() {
                     selectedStudents={data.students.filter(s => selectedStudents.includes(s.id))}
                     closeModal={closeModals}
                     groupName={currentClass?.name || ''}
-                    onLogMessage={(message, subject) => {
+                    onLogMessage={(message, subject, html) => {
                         const timestamp = new Date().toISOString();
                         setData(prev => ({
                             ...prev,
                             students: prev.students.map(s => {
                                 if (selectedStudents.includes(s.id)) {
                                     const currentHistory = s.emailHistory || [];
+                                    // `message` stays plain text: the report, the
+                                    // text export and every log reader expect it.
+                                    // `html` is only present for formatted mail and
+                                    // is rendered (and sanitised again) on display.
                                     const newLog = {
                                         id: generateId(),
                                         timestamp,
                                         message,
-                                        subject: subject || ''
+                                        subject: subject || '',
+                                        ...(html ? { html } : {})
                                     };
                                     return {
                                         ...s,
@@ -4221,15 +4242,87 @@ function ImportContactsModal({ onImportContacts, existingStudents = [], groupNam
 }
 
 // --- Draft Email Sub-Component ---
+
+// One formatting button in the composer toolbar. Suppressing mouse-down keeps
+// the caret in the editor — otherwise pressing a button moves the selection
+// and the command has nothing to act on.
+function RichToolButton({ title, onClick, children }) {
+    return (
+        <button
+            type="button"
+            title={title}
+            aria-label={title}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={onClick}
+            className="p-1.5 rounded-lg border border-transparent text-gray-300 hover:bg-white/10 hover:text-white transition-all active:scale-90"
+        >
+            {children}
+        </button>
+    );
+}
+
+// Table markup for the composer. The border attributes are not decoration:
+// Outlook's Word rendering engine draws no table borders unless they arrive as
+// attributes, and they are what makes a pasted table readable everywhere.
+function buildTableHtml(rows, cols, withHeader) {
+    const headerRow = withHeader
+        ? `<tr>${Array.from({ length: cols }, (_, i) => `<th>Column ${i + 1}</th>`).join('')}</tr>`
+        : '';
+    const bodyRows = Array.from({ length: rows }, () =>
+        `<tr>${Array.from({ length: cols }, () => '<td><br></td>').join('')}</tr>`
+    ).join('');
+    return `<table border="1" cellpadding="6" cellspacing="0"><tbody>${headerRow}${bodyRows}</tbody></table>`;
+}
+
+const DRAFT_BANNER_STYLE = 'margin:0 0 10px 0;padding:8px 12px;border:1px dashed #e0466a;color:#c0324f;background:#fff5f7;font-weight:bold;font-size:13px;text-align:center;font-family:Arial,Helvetica,sans-serif;';
+
+// Gmail, Outlook and mailto differ only in parameter names. `body` is dropped
+// for formatted messages: all three clients show HTML in it literally, so the
+// rich version travels on the clipboard instead.
+function buildComposeUrls(batch, isRich) {
+    const bcc = encodeURIComponent(batch.bcc);
+    const subject = encodeURIComponent(batch.subject);
+    const bodyParam = isRich ? '' : `&body=${encodeURIComponent(batch.body)}`;
+    return {
+        gmail: `https://mail.google.com/mail/?view=cm&fs=1&bcc=${bcc}&su=${subject}${bodyParam}`,
+        outlook: `https://outlook.office.com/mail/deeplink/compose?bcc=${bcc}&subject=${subject}${bodyParam}`,
+        mailto: `mailto:?bcc=${bcc}&subject=${subject}${bodyParam}`
+    };
+}
+
+// The HTML twin of the "DELETE BEFORE SENDING" header that wraps every batch.
+// Returns an unterminated <div> on purpose: the message body follows it and the
+// caller closes the wrapper, so header and body share one font stack.
+function buildDraftHeaderHtml(studentNamesStr, messageCountText) {
+    const names = studentNamesStr.split('\n').map(escapeHtml).join('<br>');
+    const counter = messageCountText
+        ? `<br><span style="font-weight:normal;">${escapeHtml(String(messageCountText).trim())}</span>`
+        : '';
+    return '<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5;color:#111111;">'
+        + `<p style="${DRAFT_BANNER_STYLE}">------------DELETE BEFORE SENDING------------${counter}</p>`
+        + `<p style="margin:0 0 10px 0;font-size:13px;color:#444444;">MESSAGE BEING SENT FOR:<br>${names}</p>`
+        + `<p style="${DRAFT_BANNER_STYLE}">------------DELETE BEFORE SENDING------------</p>`;
+}
+
 function DraftEmailModal({ selectedStudents, closeModal, groupName, onLogMessage, themeClasses }) {
-    const [message, setMessage] = useState('');
     const defaultSubject = groupName ? `${groupName} Update` : 'Student Update Notification';
     const [subject, setSubject] = useState(defaultSubject);
     const [draftGenerated, setDraftGenerated] = useState(false);
     const [batches, setBatches] = useState([]);
     const [copiedBccIdx, setCopiedBccIdx] = useState(null);
     const [copiedBodyIdx, setCopiedBodyIdx] = useState(null);
+    const [copiedPlainIdx, setCopiedPlainIdx] = useState(null);
     const [outlookClickedIdx, setOutlookClickedIdx] = useState(null);
+    const [pasteHint, setPasteHint] = useState(null);
+    const [popover, setPopover] = useState(null); // 'link' | 'table' | null
+    const [linkUrl, setLinkUrl] = useState('');
+    const [tableRows, setTableRows] = useState(3);
+    const [tableCols, setTableCols] = useState(3);
+    const [tableHeader, setTableHeader] = useState(true);
+    const [editorHtml, setEditorHtml] = useState('');
+    const editorRef = useRef(null);
+    const savedRangeRef = useRef(null);
+    const hintSeqRef = useRef(0);
     const isDark = themeClasses.textPrimary.includes('text-[#fcfaf2]');
 
     // Track active timers for cleanup to prevent memory leaks
@@ -4249,8 +4342,223 @@ function DraftEmailModal({ selectedStudents, closeModal, groupName, onLogMessage
     const validStudents = selectedStudents.filter(s => s.emails && s.emails.filter(Boolean).length > 0);
     const missingStudents = selectedStudents.filter(s => !s.emails || s.emails.filter(Boolean).length === 0);
 
+    // The composer in both forms. `cleanHtml` is what gets pasted into Gmail or
+    // Outlook and what the log stores for formatted mail; `plainMessage` is what
+    // the compose links, the clipboard fallback and every log reader use.
+    const cleanHtml = sanitizeEmailHtml(editorHtml);
+    const plainMessage = htmlToPlainText(editorHtml);
+    const isRich = hasRichFormatting(cleanHtml);
+
+    // --- Composer helpers ---------------------------------------------------
+    const rememberSelection = () => {
+        const selection = window.getSelection();
+        if (!selection || selection.rangeCount === 0) return;
+        const range = selection.getRangeAt(0);
+        if (editorRef.current && editorRef.current.contains(range.commonAncestorContainer)) {
+            savedRangeRef.current = range.cloneRange();
+        }
+    };
+
+    const recallSelection = () => {
+        const range = savedRangeRef.current;
+        if (!range) return false;
+        try {
+            const selection = window.getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+            return true;
+        } catch {
+            return false;
+        }
+    };
+
+    const selectionInEditor = () => {
+        const selection = window.getSelection();
+        if (!selection || selection.rangeCount === 0 || !editorRef.current) return false;
+        return editorRef.current.contains(selection.getRangeAt(0).commonAncestorContainer);
+    };
+
+    const placeCaretAtEnd = () => {
+        const el = editorRef.current;
+        if (!el) return;
+        try {
+            const range = document.createRange();
+            range.selectNodeContents(el);
+            range.collapse(false);
+            const selection = window.getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+            savedRangeRef.current = range.cloneRange();
+        } catch {
+            // Caret placement is a nicety; the command can still go through.
+        }
+    };
+
+    // Puts the caret where the next command should act: the remembered range
+    // when focus had to come back to the editor (the popover inputs steal it),
+    // the live selection when the editor already has it (typing, paste, drop),
+    // and the end of the message when there is neither.
+    const prepareCaret = () => {
+        const el = editorRef.current;
+        if (!el) return false;
+        if (document.activeElement !== el) {
+            el.focus();
+            if (recallSelection()) return true;
+        } else if (selectionInEditor()) {
+            return true;
+        }
+        if (recallSelection()) return true;
+        placeCaretAtEnd();
+        return selectionInEditor();
+    };
+
+    const syncEditor = () => {
+        if (editorRef.current) setEditorHtml(editorRef.current.innerHTML);
+    };
+
+    const exec = (command, value = null) => {
+        if (!editorRef.current) return;
+        prepareCaret();
+        try {
+            document.execCommand(command, false, value);
+        } catch (error) {
+            console.warn('[Composer] command failed:', command, error);
+        }
+        syncEditor();
+    };
+
+    const insertHtmlAtCaret = (html) => {
+        if (!editorRef.current || !prepareCaret()) return;
+
+        let done = false;
+        try {
+            done = document.execCommand('insertHTML', false, html);
+        } catch {
+            done = false;
+        }
+        if (!done) {
+            const selection = window.getSelection();
+            if (selection && selection.rangeCount) {
+                const range = selection.getRangeAt(0);
+                range.deleteContents();
+                const fragment = range.createContextualFragment(html);
+                const last = fragment.lastChild;
+                range.insertNode(fragment);
+                if (last) {
+                    range.setStartAfter(last);
+                    range.collapse(true);
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                }
+            }
+        }
+        syncEditor();
+    };
+
+    const handleEditorInput = () => {
+        rememberSelection();
+        syncEditor();
+    };
+
+    // Paste and drop go through the sanitizer so Word/Google Docs wrappers,
+    // classes and inline styles never reach the message (or the clipboard, or
+    // the log). Dropping is intercepted for the same reason: a dropped image
+    // would show in the editor and then silently vanish at generate time.
+    const insertTransferred = (data) => {
+        if (!data) return;
+        const html = data.getData('text/html');
+        const text = data.getData('text/plain');
+        if (html) insertHtmlAtCaret(sanitizeEmailHtml(html));
+        else if (text) insertHtmlAtCaret(escapeHtml(text).replace(/\r?\n/g, '<br>'));
+    };
+
+    const handleEditorPaste = (event) => {
+        event.preventDefault();
+        insertTransferred(event.clipboardData);
+    };
+
+    const handleEditorDrop = (event) => {
+        event.preventDefault();
+        insertTransferred(event.dataTransfer);
+    };
+
+    const openPopover = (name) => {
+        rememberSelection();
+        if (name === 'link') setLinkUrl('');
+        setPopover(prev => (prev === name ? null : name));
+    };
+
+    const applyLink = () => {
+        const raw = linkUrl.trim();
+        if (!raw) {
+            setPopover(null);
+            return;
+        }
+        const url = /^(https?:|mailto:|tel:|#|\/)/i.test(raw) ? raw : `https://${raw}`;
+        prepareCaret();
+
+        const selection = window.getSelection();
+        const collapsed = !selection || selection.rangeCount === 0 || selection.getRangeAt(0).collapsed;
+        if (collapsed) {
+            // Nothing selected: the URL itself becomes the link text.
+            insertHtmlAtCaret(`<a href="${url.replace(/"/g, '&quot;')}">${escapeHtml(raw)}</a>`);
+        } else {
+            try {
+                document.execCommand('createLink', false, url);
+            } catch (error) {
+                console.warn('[Composer] could not create link:', error);
+            }
+            syncEditor();
+        }
+        setPopover(null);
+        setLinkUrl('');
+    };
+
+    const clearFormatting = () => {
+        exec('removeFormat');
+        exec('unlink');
+    };
+
+    const insertTable = () => {
+        const rows = Math.min(Math.max(parseInt(tableRows, 10) || 3, 1), 20);
+        const cols = Math.min(Math.max(parseInt(tableCols, 10) || 3, 1), 10);
+        insertHtmlAtCaret(buildTableHtml(rows, cols, tableHeader));
+        setPopover(null);
+
+        // Drop the caret into the first cell so typing carries on inside it.
+        const tables = editorRef.current ? editorRef.current.querySelectorAll('table') : [];
+        const table = tables[tables.length - 1];
+        const firstCell = table ? table.querySelector('th, td') : null;
+        if (!firstCell) return;
+        try {
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(firstCell);
+            range.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            savedRangeRef.current = range.cloneRange();
+        } catch {
+            // Caret placement is a nicety; the table is already inserted.
+        }
+    };
+
+    const clearComposer = () => {
+        if (editorRef.current) editorRef.current.innerHTML = '';
+        setEditorHtml('');
+        setPopover(null);
+    };
+
+    const showHint = (text, ms = 12000) => {
+        const seq = ++hintSeqRef.current;
+        setPasteHint(text);
+        safeTimeout(() => {
+            if (hintSeqRef.current === seq) setPasteHint(null);
+        }, ms);
+    };
+
     const generateDrafts = () => {
-        if (!message.trim()) return alert("Please type a message first.");
+        if (!plainMessage.trim()) return alert("Please type a message first.");
 
         // Extract raw emails from array, remove duplicates and empty/falsy values
         let rawBccEmails = [];
@@ -4278,13 +4586,20 @@ function DraftEmailModal({ selectedStudents, closeModal, groupName, onLogMessage
                 messageCountText = `\n(Email limits require batches: This is draft ${j + 1} of ${batchCount})`;
             }
 
-            const fullMessage = `------------DELETE BEFORE SENDING------------${messageCountText}\n\nMESSAGE BEING SENT FOR:\n${studentNamesStr}\n\n------------DELETE BEFORE SENDING------------\n\n\n${message}`;
+            const fullMessage = `------------DELETE BEFORE SENDING------------${messageCountText}\n\nMESSAGE BEING SENT FOR:\n${studentNamesStr}\n\n------------DELETE BEFORE SENDING------------\n\n\n${plainMessage}`;
+            const fullHtml = `${buildDraftHeaderHtml(studentNamesStr, messageCountText)}${cleanHtml}</div>`;
 
-            newBatches.push({ bcc: bccString, body: fullMessage, subject: subject.trim() || defaultSubject });
+            newBatches.push({
+                bcc: bccString,
+                body: fullMessage,
+                html: fullHtml,
+                subject: subject.trim() || defaultSubject
+            });
         }
 
         setBatches(newBatches);
         setDraftGenerated(true);
+        setPasteHint(null);
     };
 
     // Clipboard helper
@@ -4314,6 +4629,9 @@ function DraftEmailModal({ selectedStudents, closeModal, groupName, onLogMessage
                 if (type === 'bcc') {
                     setCopiedBccIdx(index);
                     safeTimeout(() => setCopiedBccIdx(null), 2000);
+                } else if (type === 'plain') {
+                    setCopiedPlainIdx(index);
+                    safeTimeout(() => setCopiedPlainIdx(null), 2000);
                 } else {
                     setCopiedBodyIdx(index);
                     safeTimeout(() => setCopiedBodyIdx(null), 2000);
@@ -4321,6 +4639,22 @@ function DraftEmailModal({ selectedStudents, closeModal, groupName, onLogMessage
             }
         } catch (err) {
             console.error('Could not copy text: ', err);
+        }
+    };
+
+    // Formatted body onto the clipboard. Both Gmail and Outlook ignore HTML in
+    // their compose links, so a paste is the only route a table or a bold word
+    // can take into the message.
+    const handleCopyRich = async (batch, index) => {
+        const result = await copyRichToClipboard(batch.html, batch.body);
+        if (result === 'html') {
+            setCopiedBodyIdx(index);
+            safeTimeout(() => setCopiedBodyIdx(null), 2000);
+            showHint('Formatted message copied — click into the message area and paste (⌘V or Ctrl+V).', 8000);
+        } else if (result === 'text') {
+            showHint('This browser only allowed a plain text copy, so the formatting will not paste through.', 8000);
+        } else {
+            showHint('Copying was blocked by the browser — the plain text buttons below still work.', 8000);
         }
     };
 
@@ -4340,8 +4674,30 @@ function DraftEmailModal({ selectedStudents, closeModal, groupName, onLogMessage
         window.open(url, '_blank');
     };
 
+    // Opens a compose window. Plain messages keep the old behaviour (the body
+    // rides in the link). Formatted ones put the HTML on the clipboard first —
+    // synchronously, before the window opens — and leave the body empty for a
+    // single paste, because that is the only thing Gmail and Outlook accept.
+    const openCompose = (url, batch, client, index) => {
+        if (!isRich) {
+            if (client === 'outlook') handleOutlookClick(url, batch.bcc, index);
+            else openLink(url);
+            return;
+        }
+
+        const pending = copyRichToClipboard(batch.html, batch.body);
+        window.open(url, '_blank');
+        pending.then(result => {
+            if (result === 'html') showHint('Formatted message copied — click into the empty message area and paste once (⌘V or Ctrl+V).');
+            else if (result === 'text') showHint('This browser only allowed a plain text copy, so the formatting will not paste through.');
+            else showHint('Copying was blocked — use “Copy Formatted Body” and paste it yourself.');
+        });
+    };
+
     const handleComplete = () => {
-        onLogMessage(message, subject.trim() || defaultSubject);
+        // The log keeps the plain text reading; formatted mail additionally
+        // stores the HTML so the conversation log can show it as it went out.
+        onLogMessage(plainMessage, subject.trim() || defaultSubject, isRich ? cleanHtml : null);
     };
 
     return (
@@ -4362,33 +4718,131 @@ function DraftEmailModal({ selectedStudents, closeModal, groupName, onLogMessage
                         </div>
                     )}
 
-                    {!draftGenerated ? (
-                        <div className="space-y-4 flex flex-col h-full">
-                            <p className="text-sm text-[#c1c0c1] font-semibold">
-                                Type the subject line and message you would like to send. This exact message will be saved to your local log. You will have a chance to edit the final email in your email app before sending.
-                            </p>
-                            <div className="flex flex-col gap-1.5">
-                                <label className="text-xs font-bold text-gray-400 uppercase tracking-wider">Subject Line</label>
-                                <input
-                                    type="text"
-                                    value={subject}
-                                    onChange={(e) => setSubject(e.target.value)}
-                                    className={`w-full border border-gray-200/10 rounded-xl p-3 focus:ring-2 focus:ring-[#ff6188] outline-none bg-gray-500/5 font-semibold text-sm ${themeClasses.inputBg || ''}`}
-                                    placeholder="Enter email subject line..."
-                                />
-                            </div>
-                            <div className="flex-1 flex flex-col gap-1.5 min-h-[220px]">
-                                <label className="text-xs font-bold text-gray-400 uppercase tracking-wider">Message Content</label>
-                                <textarea
-                                    value={message}
-                                    onChange={(e) => setMessage(e.target.value)}
-                                    autoFocus
-                                    className="w-full flex-1 border border-gray-200/10 rounded-2xl p-4 focus:ring-2 focus:ring-[#ff6188] outline-none resize-none bg-gray-500/5 font-semibold text-sm leading-relaxed"
-                                    placeholder="Hello Parents,&#10;&#10;I wanted to share a quick update regarding your child's progress in class this week..."
-                                />
-                            </div>
+                    {/* The composer stays mounted while the drafts are shown, so
+                        "Back" returns to the message exactly as written. */}
+                    <div className={draftGenerated ? 'hidden' : 'space-y-4 flex flex-col h-full'}>
+                        <p className="text-sm text-[#c1c0c1] font-semibold">
+                            Type the subject line and message you would like to send. Use the toolbar for <strong>bold</strong>, lists, links and tables — formatted messages reach Gmail and Outlook as a paste, and a plain text copy is always kept in your log. You will have a chance to edit the final email in your email app before sending.
+                        </p>
+                        <div className="flex flex-col gap-1.5">
+                            <label className="text-xs font-bold text-gray-400 uppercase tracking-wider">Subject Line</label>
+                            <input
+                                type="text"
+                                value={subject}
+                                onChange={(e) => setSubject(e.target.value)}
+                                className={`w-full border border-gray-200/10 rounded-xl p-3 focus:ring-2 focus:ring-[#ff6188] outline-none bg-gray-500/5 font-semibold text-sm ${themeClasses.inputBg || ''}`}
+                                placeholder="Enter email subject line..."
+                            />
                         </div>
-                    ) : (
+                        <div className="flex-1 flex flex-col gap-1.5 min-h-[300px]">
+                            <label className="text-xs font-bold text-gray-400 uppercase tracking-wider">Message Content</label>
+
+                            <div className="flex-1 flex flex-col border border-gray-200/10 rounded-2xl overflow-hidden bg-gray-500/5 focus-within:ring-2 focus-within:ring-[#ff6188] transition-shadow">
+                                {/* Formatting toolbar */}
+                                <div className="flex flex-wrap items-center gap-0.5 px-2 py-1.5 border-b border-gray-200/10 bg-white/5">
+                                    <RichToolButton title="Bold (Ctrl+B)" onClick={() => exec('bold')}><Bold size={14} /></RichToolButton>
+                                    <RichToolButton title="Italic (Ctrl+I)" onClick={() => exec('italic')}><Italic size={14} /></RichToolButton>
+                                    <RichToolButton title="Underline (Ctrl+U)" onClick={() => exec('underline')}><Underline size={14} /></RichToolButton>
+                                    <RichToolButton title="Strikethrough" onClick={() => exec('strikeThrough')}><Strikethrough size={14} /></RichToolButton>
+                                    <span className="w-px h-4 bg-gray-200/10 mx-1" />
+                                    <RichToolButton title="Bullet list" onClick={() => exec('insertUnorderedList')}><List size={14} /></RichToolButton>
+                                    <RichToolButton title="Numbered list" onClick={() => exec('insertOrderedList')}><ListOrdered size={14} /></RichToolButton>
+                                    <span className="w-px h-4 bg-gray-200/10 mx-1" />
+                                    <RichToolButton title="Insert link" onClick={() => openPopover('link')}><Link size={14} /></RichToolButton>
+                                    <RichToolButton title="Insert table" onClick={() => openPopover('table')}><Table size={14} /></RichToolButton>
+                                    <span className="w-px h-4 bg-gray-200/10 mx-1" />
+                                    <RichToolButton title="Clear formatting" onClick={clearFormatting}><RemoveFormatting size={14} /></RichToolButton>
+                                    <span className="ml-auto hidden sm:inline pl-2 text-[10px] font-bold text-gray-500">Gmail &amp; Outlook get this as a paste</span>
+                                </div>
+
+                                {popover === 'link' && (
+                                    <div className="flex items-center gap-2 px-2.5 py-2 border-b border-gray-200/10 bg-[#ff6188]/10">
+                                        <Link size={13} className="text-[#ff6188] shrink-0" />
+                                        <input
+                                            autoFocus
+                                            value={linkUrl}
+                                            onChange={(e) => setLinkUrl(e.target.value)}
+                                            onKeyDown={(e) => {
+                                                if (e.key === 'Enter') { e.preventDefault(); applyLink(); }
+                                                if (e.key === 'Escape') setPopover(null);
+                                            }}
+                                            placeholder="https://example.com"
+                                            className="flex-1 min-w-0 text-xs font-semibold bg-transparent border border-gray-200/10 rounded-lg px-2.5 py-1.5 outline-none"
+                                        />
+                                        <button type="button" onClick={applyLink} className="text-[11px] font-bold px-2.5 py-1.5 rounded-lg bg-[#ff6188] text-white transition-all active:scale-95">Add</button>
+                                        <button
+                                            type="button"
+                                            onClick={() => { exec('unlink'); setPopover(null); }}
+                                            className="text-[11px] font-bold px-2.5 py-1.5 rounded-lg bg-white/10 text-gray-300 transition-all active:scale-95"
+                                        >
+                                            Remove
+                                        </button>
+                                    </div>
+                                )}
+
+                                {popover === 'table' && (
+                                    <div className="flex flex-wrap items-center gap-3 px-2.5 py-2 border-b border-gray-200/10 bg-[#78dce8]/10">
+                                        <label className="flex items-center gap-1.5 text-[11px] font-bold text-gray-300">
+                                            Rows
+                                            <input
+                                                type="number" min="1" max="20" value={tableRows}
+                                                onChange={(e) => setTableRows(e.target.value)}
+                                                className="w-14 text-xs font-bold bg-gray-500/10 border border-gray-200/10 rounded-lg px-2 py-1 outline-none"
+                                            />
+                                        </label>
+                                        <label className="flex items-center gap-1.5 text-[11px] font-bold text-gray-300">
+                                            Columns
+                                            <input
+                                                type="number" min="1" max="10" value={tableCols}
+                                                onChange={(e) => setTableCols(e.target.value)}
+                                                className="w-14 text-xs font-bold bg-gray-500/10 border border-gray-200/10 rounded-lg px-2 py-1 outline-none"
+                                            />
+                                        </label>
+                                        <label className="flex items-center gap-1.5 text-[11px] font-bold text-gray-300 cursor-pointer">
+                                            <input
+                                                type="checkbox"
+                                                checked={tableHeader}
+                                                onChange={(e) => setTableHeader(e.target.checked)}
+                                                className="accent-[#78dce8]"
+                                            />
+                                            Header row
+                                        </label>
+                                        <button type="button" onClick={insertTable} className="ml-auto text-[11px] font-bold px-3 py-1.5 rounded-lg bg-[#78dce8] text-[#221f22] transition-all active:scale-95">
+                                            Insert table
+                                        </button>
+                                    </div>
+                                )}
+
+                                {/* The message itself */}
+                                <div className="relative flex flex-col">
+                                    <div
+                                        ref={editorRef}
+                                        contentEditable
+                                        suppressContentEditableWarning
+                                        role="textbox"
+                                        aria-multiline="true"
+                                        aria-label="Message content"
+                                        autoFocus
+                                        onInput={handleEditorInput}
+                                        onPaste={handleEditorPaste}
+                                        onDrop={handleEditorDrop}
+                                        className="rich-editor w-full min-h-[220px] max-h-[45vh] overflow-y-auto p-4 text-sm leading-relaxed outline-none"
+                                    />
+                                    {plainMessage.trim() === '' && (
+                                        <div className="pointer-events-none absolute inset-x-4 top-4 text-sm leading-relaxed text-gray-500 font-semibold whitespace-pre-line">
+                                            {"Hello Parents,\n\nI wanted to share a quick update regarding your child's progress in class this week..."}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+
+                            <p className="text-[11px] text-gray-500 font-semibold">
+                                Pasting from Word or Google Docs is cleaned up automatically — only the formatting you see here is kept.
+                            </p>
+                        </div>
+                    </div>
+
+                    {draftGenerated && (
                         <div className="space-y-6">
                             <div className="bg-[#ff6188]/10 border border-[#ff6188]/20 rounded-2xl p-5 text-center">
                                 <Check size={40} className="mx-auto text-[#a9dc76] mb-3 animate-bounce" />
@@ -4399,11 +4853,19 @@ function DraftEmailModal({ selectedStudents, closeModal, groupName, onLogMessage
                                         : "Your draft is ready. Choose your email service below."}
                                 </p>
 
+                                {pasteHint && (
+                                    <div className="mb-4 p-3 text-left bg-[#78dce8]/10 border border-[#78dce8]/30 text-[#78dce8] text-xs rounded-xl font-bold flex items-start gap-2">
+                                        <AlertCircle size={14} className="flex-shrink-0 mt-0.5" />
+                                        <span>{pasteHint}</span>
+                                    </div>
+                                )}
+
                                 <div className="space-y-4">
                                     {batches.map((batch, idx) => {
-                                        const gmailUrl = `https://mail.google.com/mail/?view=cm&fs=1&bcc=${encodeURIComponent(batch.bcc)}&su=${encodeURIComponent(batch.subject)}&body=${encodeURIComponent(batch.body)}`;
-                                        const outlookUrl = `https://outlook.office.com/mail/deeplink/compose?bcc=${encodeURIComponent(batch.bcc)}&subject=${encodeURIComponent(batch.subject)}&body=${encodeURIComponent(batch.body)}`;
-                                        const mailtoUrl = `mailto:?bcc=${encodeURIComponent(batch.bcc)}&subject=${encodeURIComponent(batch.subject)}&body=${encodeURIComponent(batch.body)}`;
+                                        // Recipients and subject ride in the link; the
+                                        // body only does for plain messages (see
+                                        // buildComposeUrls).
+                                        const { gmail: gmailUrl, outlook: outlookUrl, mailto: mailtoUrl } = buildComposeUrls(batch, isRich);
 
                                         return (
                                             <div key={idx} className="bg-white/5 border border-green-500/20 rounded-xl p-4 text-left relative overflow-hidden">
@@ -4417,7 +4879,7 @@ function DraftEmailModal({ selectedStudents, closeModal, groupName, onLogMessage
                                                 </div>
 
                                                 {/* Copy Tools */}
-                                                <div className="grid grid-cols-2 gap-2 mb-4">
+                                                <div className={`grid gap-2 mb-4 ${isRich ? 'grid-cols-2 md:grid-cols-3' : 'grid-cols-2'}`}>
                                                     <button
                                                         type="button"
                                                         onClick={() => handleCopyText(batch.bcc, 'bcc', idx)}
@@ -4430,21 +4892,50 @@ function DraftEmailModal({ selectedStudents, closeModal, groupName, onLogMessage
                                                         {copiedBccIdx === idx ? 'BCC Copied!' : 'Copy BCC List'}
                                                     </button>
 
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => handleCopyText(batch.body, 'body', idx)}
-                                                        className={`flex items-center justify-center gap-2 py-1.5 px-3 rounded-lg text-xs font-bold transition-all active:scale-95 border ${copiedBodyIdx === idx
-                                                            ? 'bg-[#ff6188]/20 text-[#ff6188] border-[#ff6188]/30'
-                                                            : 'bg-white/5 hover:bg-white/10 text-gray-200 border-gray-200/10'
-                                                            }`}
-                                                    >
-                                                        {copiedBodyIdx === idx ? <Check size={14} /> : <Copy size={14} />}
-                                                        {copiedBodyIdx === idx ? 'Body Copied!' : 'Copy Body Content'}
-                                                    </button>
+                                                    {isRich ? (
+                                                        <>
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => handleCopyRich(batch, idx)}
+                                                                className={`flex items-center justify-center gap-2 py-1.5 px-3 rounded-lg text-xs font-bold transition-all active:scale-95 border ${copiedBodyIdx === idx
+                                                                    ? 'bg-[#78dce8]/20 text-[#78dce8] border-[#78dce8]/30'
+                                                                    : 'bg-white/5 hover:bg-white/10 text-gray-200 border-gray-200/10'
+                                                                    }`}
+                                                            >
+                                                                {copiedBodyIdx === idx ? <Check size={14} /> : <Copy size={14} />}
+                                                                {copiedBodyIdx === idx ? 'Copied!' : 'Copy Formatted Body'}
+                                                            </button>
+
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => handleCopyText(batch.body, 'plain', idx)}
+                                                                className={`flex items-center justify-center gap-2 py-1.5 px-3 rounded-lg text-xs font-bold transition-all active:scale-95 border ${copiedPlainIdx === idx
+                                                                    ? 'bg-[#ff6188]/20 text-[#ff6188] border-[#ff6188]/30'
+                                                                    : 'bg-white/5 hover:bg-white/10 text-gray-200 border-gray-200/10'
+                                                                    }`}
+                                                            >
+                                                                {copiedPlainIdx === idx ? <Check size={14} /> : <Copy size={14} />}
+                                                                {copiedPlainIdx === idx ? 'Plain Copied!' : 'Copy Plain Text'}
+                                                            </button>
+                                                        </>
+                                                    ) : (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => handleCopyText(batch.body, 'body', idx)}
+                                                            className={`flex items-center justify-center gap-2 py-1.5 px-3 rounded-lg text-xs font-bold transition-all active:scale-95 border ${copiedBodyIdx === idx
+                                                                ? 'bg-[#ff6188]/20 text-[#ff6188] border-[#ff6188]/30'
+                                                                : 'bg-white/5 hover:bg-white/10 text-gray-200 border-gray-200/10'
+                                                                }`}
+                                                        >
+                                                            {copiedBodyIdx === idx ? <Check size={14} /> : <Copy size={14} />}
+                                                            {copiedBodyIdx === idx ? 'Body Copied!' : 'Copy Body Content'}
+                                                        </button>
+                                                    )}
                                                 </div>
 
-                                                {/* Outlook Helper Tooltip */}
-                                                {outlookClickedIdx === idx && (
+                                                {/* Outlook Helper Tooltip (plain messages only —
+                                                    formatted ones put the body on the clipboard) */}
+                                                {!isRich && outlookClickedIdx === idx && (
                                                     <div className="mb-3 p-2.5 bg-yellow-500/15 border border-yellow-500/30 text-yellow-450 text-xs rounded-lg font-bold animate-pulse flex items-center gap-1.5">
                                                         <AlertCircle size={14} className="text-yellow-500 flex-shrink-0" />
                                                         Outlook opened! Parent emails auto-copied—just press <strong>Ctrl+V</strong> (or <strong>Cmd+V</strong>) in the BCC field!
@@ -4453,16 +4944,16 @@ function DraftEmailModal({ selectedStudents, closeModal, groupName, onLogMessage
 
                                                 {/* Action buttons */}
                                                 <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-                                                    <button onClick={() => openLink(gmailUrl)} className="flex items-center justify-center gap-2 py-2 px-3 bg-red-500/10 text-red-450 hover:bg-red-500/20 rounded-xl border border-red-500/20 text-sm font-bold transition-all active:scale-95">
+                                                    <button onClick={() => openCompose(gmailUrl, batch, 'gmail', idx)} className="flex items-center justify-center gap-2 py-2 px-3 bg-red-500/10 text-red-450 hover:bg-red-500/20 rounded-xl border border-red-500/20 text-sm font-bold transition-all active:scale-95">
                                                         <ExternalLink size={16} /> Gmail Web
                                                     </button>
                                                     <button
-                                                        onClick={() => handleOutlookClick(outlookUrl, batch.bcc, idx)}
+                                                        onClick={() => openCompose(outlookUrl, batch, 'outlook', idx)}
                                                         className="flex items-center justify-center gap-2 py-2 px-3 bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 rounded-xl border border-blue-500/20 text-sm font-bold transition-all active:scale-95"
                                                     >
                                                         <ExternalLink size={16} /> Outlook Web
                                                     </button>
-                                                    <button onClick={() => openLink(mailtoUrl)} className="flex items-center justify-center gap-2 py-2 px-3 bg-white/5 text-gray-300 hover:bg-white/10 rounded-xl border border-gray-200/10 text-sm font-bold transition-all active:scale-95">
+                                                    <button onClick={() => openCompose(mailtoUrl, batch, 'mailto', idx)} className="flex items-center justify-center gap-2 py-2 px-3 bg-white/5 text-gray-300 hover:bg-white/10 rounded-xl border border-gray-200/10 text-sm font-bold transition-all active:scale-95">
                                                         <Copy size={16} /> Default App
                                                     </button>
                                                 </div>
@@ -4474,6 +4965,16 @@ function DraftEmailModal({ selectedStudents, closeModal, groupName, onLogMessage
 
                             <div className="bg-[#ab9df2]/10 border-l-4 border-[#ab9df2] p-4 text-[#ab9df2] text-xs font-semibold rounded-r-xl">
                                 <strong>💡 Tip:</strong> Because security configurations for Microsoft 365 or Gmail can sometimes hide or block automatic populating of the BCC field, clicking "Outlook Web" automatically copies the email addresses to your clipboard. Simply open the compose window, ensure the BCC field is visible, and press Paste (Ctrl+V) to paste the addresses to the BCC section!
+                                {isRich && (
+                                    <>
+                                        <p className="mt-2">
+                                            <strong>Formatting:</strong> neither Gmail nor Outlook accepts HTML through their compose links, so for this message the Gmail, Outlook and Default App buttons copy the formatted text instead — click into the empty message body and paste once.
+                                        </p>
+                                        <p className="mt-2">
+                                            Outlook then needs the recipients: if its BCC field is empty, click <strong>Copy BCC List</strong> above and paste again. "Copy Plain Text" is there when you would rather send everything unformatted.
+                                        </p>
+                                    </>
+                                )}
                             </div>
                         </div>
                     )}
