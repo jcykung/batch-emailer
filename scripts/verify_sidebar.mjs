@@ -78,6 +78,9 @@ try {
     assert.match(pinnedHtml, /title="Unpin folder"/, 'hover pin toggle renders for the pinned folder');
     assert.match(pinnedHtml, /title="Pin folder"/, 'hover pin toggle renders for the unpinned folder');
     assert.match(pinnedHtml, /title="Period 1"/, "a pinned folder's groups stay visible");
+    assert.match(pinnedHtml, /aria-label="Close sidebar"/, 'divider handle renders as an arrow toggle');
+    assert.match(pinnedHtml, /lucide-chevron-left/, 'the arrow points at the sidebar while it is open');
+    assert.ok(!/Toggle Sidebar/.test(pinnedHtml), 'the old hamburger toggle is gone from the header');
 
     // --- Nothing pinned ---------------------------------------------------
     seed([

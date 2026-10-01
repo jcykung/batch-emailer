@@ -2,8 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import {
     Folder, Book, Trash2, Edit2, Mail, Download, Upload, Plus,
     CheckSquare, Square, X, Archive, FileText, Check, AlertCircle,
-    Copy, ExternalLink, RefreshCw, FolderOpen, MoreVertical, Menu,
-    ChevronDown, ChevronUp, Clock, History, Trash, Printer, FileSpreadsheet,
+    Copy, ExternalLink, RefreshCw, FolderOpen, MoreVertical,
+    ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Clock, History, Trash, Printer, FileSpreadsheet,
     Sun, Moon, Sparkles, Coffee, AlertTriangle, CheckCircle2, Cloud, CloudOff,
     Pin, PinOff
 } from 'lucide-react';
@@ -2764,15 +2764,31 @@ export default function App() {
                 </div>
             </div>
 
+            {/* Sidebar divider handle — an arrow straddling the vertical divider.
+                It follows the sidebar as it slides, so it always reads as the
+                divider's own close/open control (replaces the old hamburger). */}
+            <button
+                type="button"
+                onClick={() => setSidebarOpen(open => !open)}
+                aria-label={sidebarOpen ? 'Close sidebar' : 'Open sidebar'}
+                title={sidebarOpen ? 'Close sidebar' : 'Open sidebar'}
+                style={{ left: sidebarOpen ? 'calc(18rem - 0.75rem)' : '0rem' }}
+                className={`group absolute top-1/2 -translate-y-1/2 z-40 flex items-center justify-center w-6 h-14 rounded-full border shadow-lg transition-all duration-300 ease-in-out active:scale-95 focus:outline-none focus-visible:ring-2 ${isDark
+                    ? 'bg-[#3a373a] border-[#4a474a] text-[#fcfaf2] hover:bg-[#4a474a] hover:text-[#78dce8] focus-visible:ring-[#78dce8]'
+                    : 'bg-white border-[#e1d5e3] text-[#2d2a2e] shadow-[#000]/10 hover:bg-[#faf8f2] hover:text-[#e0466a] focus-visible:ring-[#e0466a]'
+                    }`}
+            >
+                {sidebarOpen
+                    ? <ChevronLeft size={18} className="transition-transform duration-300 group-hover:-translate-x-0.5" />
+                    : <ChevronRight size={18} className="transition-transform duration-300 group-hover:translate-x-0.5" />}
+            </button>
+
             {/* Main Content Area */}
             <div className="flex-1 flex flex-col h-full overflow-hidden relative w-full">
 
                 {/* Header toolbar with centralized 'Batch Emailer' title */}
                 <div className={`flex items-center justify-between p-4 border-b transition-colors duration-300 ${themeClasses.headerBg} backdrop-blur-md sticky top-0 z-10`}>
                     <div className="flex items-center gap-3">
-                        <button onClick={() => setSidebarOpen(!sidebarOpen)} className={`p-1.5 rounded-lg transition-colors ${isDark ? 'hover:bg-[#3a373a]' : 'hover:bg-[#f2ece0]'} focus:outline-none`} title="Toggle Sidebar">
-                            <Menu size={22} />
-                        </button>
                         <div className="flex flex-col">
                             <div className="flex items-center gap-2">
                                 <span className="font-bold text-lg md:text-xl flex items-center gap-2 select-none">
