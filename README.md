@@ -23,7 +23,7 @@ Organize contacts into folders and groups, compose messages, and send batch emai
 
 ### 📁 Organize
 - **Folders & Groups** — Nest contact groups inside folders for clean hierarchical organization
-- **Pinned Folders** — Pin a folder (pin button on hover, or right-click → Pin) to keep it in the sidebar's collapsible **Pinned** section; the **Groups** section (also collapsible) holds the full folder tree and its **+** button adds a new folder
+- **Pinned Favourites** — Pin a folder *or* a group (hover → pin icon, or right-click → Pin) and it is listed in the collapsible **Pinned** section at the top of the sidebar; pinned groups show which folder they live in, and the **Groups** section (also collapsible) holds the full folder tree with a **+** button that adds a new folder
 - **Archive & Restore** — Soft-archive folders and groups without losing data
 - **Collapsible Sidebar** — Responsive navigation that auto-collapses on mobile
 
@@ -109,7 +109,7 @@ npm run verify-import     # contact import parses every supported format
 npm run verify-sidebar    # sidebar Pinned/Groups structure renders correctly
 ```
 
-`verify-backup` round-trips a realistic dataset through encrypt → write → read → verify, and confirms that missing contacts, missing **email messages** or missing settings make verification fail loudly. `verify-import` feeds the pasted formats a real user might copy (Docs tables, stacks of names and emails, CSV with quoted commas) through the parser. `verify-sidebar` renders the app server-side to confirm the sidebar keeps its Pinned and Groups sections, that pinned folders appear in both, and that the empty states behave. Run them after touching the backup, import or sidebar code.
+`verify-backup` round-trips a realistic dataset through encrypt → write → read → verify, and confirms that missing contacts, missing **email messages** or missing settings make verification fail loudly. `verify-import` feeds the pasted formats a real user might copy (Docs tables, stacks of names and emails, CSV with quoted commas) through the parser. `verify-sidebar` renders the app server-side to confirm the sidebar keeps its Pinned and Groups sections, that pinned folders *and* groups appear both in Pinned and in their place in the tree, that the divider arrow replaced the hamburger, and that the empty states behave. Run them after touching the backup, import or sidebar code.
 
 ---
 

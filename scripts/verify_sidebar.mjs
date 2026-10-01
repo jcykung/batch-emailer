@@ -60,12 +60,13 @@ try {
     };
     const count = (hay, needle) => hay.split(needle).length - 1;
 
-    // --- One pinned folder plus one plain folder --------------------------
+    // --- Pinned folder + pinned group, plus plain ones ---------------------
     seed([
         { id: 'f1', name: 'Alpha', isArchived: false, isPinned: true, createdAt: '2026-01-01T00:00:00.000Z' },
         { id: 'f2', name: 'Beta', isArchived: false, isPinned: false, createdAt: '2026-01-02T00:00:00.000Z' }
     ], [
-        { id: 'g1', folderId: 'f1', name: 'Period 1', isArchived: false, createdAt: '2026-01-03T00:00:00.000Z' }
+        { id: 'g1', folderId: 'f1', name: 'Period 1', isArchived: false, isPinned: true, createdAt: '2026-01-03T00:00:00.000Z' },
+        { id: 'g2', folderId: 'f2', name: 'Chess', isArchived: false, isPinned: false, createdAt: '2026-01-04T00:00:00.000Z' }
     ]);
 
     const pinnedHtml = renderToString(React.createElement(App));
@@ -77,7 +78,20 @@ try {
     assert.strictEqual(count(pinnedHtml, 'title="Beta"'), 1, 'unpinned folder shows only in Groups');
     assert.match(pinnedHtml, /title="Unpin folder"/, 'hover pin toggle renders for the pinned folder');
     assert.match(pinnedHtml, /title="Pin folder"/, 'hover pin toggle renders for the unpinned folder');
-    assert.match(pinnedHtml, /title="Period 1"/, "a pinned folder's groups stay visible");
+    assert.strictEqual(
+        count(pinnedHtml, 'title="Period 1"'),
+        3,
+        'pinned group appears on its own plus inside its folder wherever that folder is listed'
+    );
+    assert.strictEqual(count(pinnedHtml, 'title="Chess"'), 1, 'unpinned group shows only inside its folder');
+    assert.match(pinnedHtml, /title="Unpin group"/, 'hover pin toggle renders for the pinned group');
+    assert.match(pinnedHtml, /title="Pin group"/, 'hover pin toggle renders for the unpinned group');
+    assert.match(pinnedHtml, /title="In folder: Alpha"/, 'a pinned group names the folder it lives in');
+    assert.strictEqual(
+        count(pinnedHtml, 'aria-label="Pinned"'),
+        5,
+        'pin badges render for both pinned items in every place they are listed'
+    );
     assert.match(pinnedHtml, /aria-label="Close sidebar"/, 'divider handle renders as an arrow toggle');
     assert.match(pinnedHtml, /lucide-chevron-left/, 'the arrow points at the sidebar while it is open');
     assert.ok(!/Toggle Sidebar/.test(pinnedHtml), 'the old hamburger toggle is gone from the header');
@@ -95,10 +109,12 @@ try {
     const noFoldersHtml = renderToString(React.createElement(App));
     assert.match(noFoldersHtml, /Nothing pinned yet/, 'Pinned placeholder with no folders');
     assert.match(noFoldersHtml, /Press \+ to create one/, 'Groups empty state points at the + button');
+    assert.match(noFoldersHtml, /Right-click a folder or group/, 'placeholder explains how to pin both kinds');
 
     console.log('✓ Sidebar structure checks passed:');
     console.log('  - Pinned + Groups sections render; the New Folder button became a + beside Groups');
-    console.log('  - pinned folders appear in both sections and the empty states read correctly');
+    console.log('  - pinned folders and groups each appear in Pinned and in their place in the tree');
+    console.log('  - divider arrow replaces the hamburger and the empty states read correctly');
 } finally {
     rmSync(fileURLToPath(outfileUrl), { force: true });
 }

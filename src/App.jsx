@@ -107,6 +107,7 @@ function getCanonicalData(folders = null, classes = null, students = null) {
         name: c.name || '',
         folderId: c.folderId || null,
         isArchived: !!c.isArchived,
+        isPinned: !!c.isPinned,
         createdAt: c.createdAt || ''
     }));
 
@@ -1125,6 +1126,7 @@ export default function App() {
     const activeClasses = data.classes.filter(c =>
         showArchived ? true : !c.isArchived
     );
+    const pinnedClasses = activeClasses.filter(c => c.isPinned);
     const currentClass = data.classes.find(c => c.id === activeClassId);
     const classStudents = data.students.filter(s => s.classId === activeClassId);
 
@@ -1239,16 +1241,16 @@ export default function App() {
         });
     };
 
-    // Right-click on a sidebar folder: pin/unpin, edit, archive, delete
-    const openFolderContextMenu = (e, folderId) => {
+    // Right-click on a sidebar folder or group: pin/unpin, edit, archive, delete
+    const openSidebarContextMenu = (e, type, itemId) => {
         e.preventDefault();
         e.stopPropagation();
 
         const MENU_WIDTH = 200;
         const MENU_HEIGHT = 190;
         setContextMenu({
-            type: 'folder',
-            folderId,
+            type,
+            [type === 'folder' ? 'folderId' : 'classId']: itemId,
             x: Math.max(8, Math.min(e.clientX, window.innerWidth - MENU_WIDTH - 8)),
             y: Math.max(8, Math.min(e.clientY, window.innerHeight - MENU_HEIGHT - 8))
         });
@@ -1294,7 +1296,7 @@ export default function App() {
                 classes: prev.classes.map(c => c.id === editingItem.id ? { ...c, name, folderId } : c)
             }));
         } else {
-            const newClass = { id: generateId(), folderId, name, isArchived: false, createdAt: new Date().toISOString() };
+            const newClass = { id: generateId(), folderId, name, isArchived: false, isPinned: false, createdAt: new Date().toISOString() };
             setData(prev => ({ ...prev, classes: [...prev.classes, newClass] }));
             setActiveClassId(newClass.id);
         }
@@ -1475,6 +1477,15 @@ export default function App() {
         setData(prev => ({
             ...prev,
             folders: prev.folders.map(f => f.id === id ? { ...f, isPinned: !f.isPinned } : f)
+        }));
+        setPinnedOpen(true);
+    };
+
+    // Groups can be pinned the same way
+    const togglePinClass = (id) => {
+        setData(prev => ({
+            ...prev,
+            classes: prev.classes.map(c => c.id === id ? { ...c, isPinned: !c.isPinned } : c)
         }));
         setPinnedOpen(true);
     };
@@ -2518,20 +2529,66 @@ export default function App() {
     };
 
     // Contact context menu: the contact that was right-clicked, and what a "Delete" click removes
-    const isContactMenu = !!contextMenu && contextMenu.type !== 'folder';
+    const isContactMenu = !!contextMenu && contextMenu.type === 'contact';
     const contextTargetStudent = isContactMenu ? classStudents.find(s => s.id === contextMenu.studentId) : null;
     const contextMenuTargets = isContactMenu
         ? (contextTargetStudent && selectedStudents.includes(contextTargetStudent.id) && selectedStudents.length > 1
             ? selectedStudents
             : [contextMenu.studentId])
         : [];
-    // Folder context menu: the sidebar folder that was right-clicked
+    // Folder/group context menu: the sidebar item that was right-clicked
     const contextTargetFolder = contextMenu && contextMenu.type === 'folder'
         ? data.folders.find(f => f.id === contextMenu.folderId)
+        : null;
+    const contextTargetClass = contextMenu && contextMenu.type === 'class'
+        ? data.classes.find(c => c.id === contextMenu.classId)
+        : null;
+    const contextTargetClassFolder = contextTargetClass
+        ? data.folders.find(f => f.id === contextTargetClass.folderId)
         : null;
     const contextMenuDeleteLabel = contextMenuTargets.length > 1
         ? `Delete ${contextMenuTargets.length} Contacts`
         : 'Delete Contact';
+
+    // One group row — used inside a folder's group list and, with the parent
+    // folder name shown, as a standalone entry in the Pinned section.
+    const renderGroupBlock = (cls, showFolder = false) => {
+        const parentFolder = showFolder ? data.folders.find(f => f.id === cls.folderId) : null;
+        return (
+            <div
+                key={cls.id}
+                className={`group flex items-center justify-between p-2 rounded-md cursor-pointer transition-all duration-200 text-sm ${activeClassId === cls.id
+                    ? (isDark ? 'bg-[#ab9df2]/15 text-[#ab9df2] font-semibold' : 'bg-[#ab9df2]/20 text-[#5c4cb0] font-semibold')
+                    : (isDark ? 'hover:bg-[#3a373a]/20 text-[#939293]' : 'hover:bg-[#e1d5e3]/20 text-[#726f73]')
+                    }`}
+                onClick={() => { setActiveClassId(cls.id); setSelectedStudents([]); }}
+                onContextMenu={(e) => openSidebarContextMenu(e, 'class', cls.id)}
+            >
+                <div className="flex items-center gap-2 truncate">
+                    <Book size={14} className={`shrink-0 ${activeClassId === cls.id ? 'text-[#ab9df2]' : 'text-gray-400'}`} />
+                    <span className="truncate max-w-[120px]" title={cls.name}>{cls.name}</span>
+                    {cls.isArchived && <span className="text-[10px] bg-[#fc9867]/20 text-[#fc9867] border border-[#fc9867]/30 px-1.5 py-0.5 rounded font-bold shrink-0">Archive</span>}
+                    {cls.isPinned && <Pin size={11} className="text-[#ffd866] shrink-0" aria-label="Pinned" />}
+                    {parentFolder && (
+                        <span
+                            className={`truncate max-w-[80px] text-[10px] font-semibold shrink-0 ${themeClasses.textMuted}`}
+                            title={`In folder: ${parentFolder.name}`}
+                        >
+                            {parentFolder.name}
+                        </span>
+                    )}
+                </div>
+                <div className="hidden group-hover:flex items-center gap-1 shrink-0">
+                    <button onClick={(e) => { e.stopPropagation(); togglePinClass(cls.id); }} className="p-1 text-gray-400 hover:text-[#ffd866] transition-colors" title={cls.isPinned ? 'Unpin group' : 'Pin group'}>
+                        {cls.isPinned ? <PinOff size={13} /> : <Pin size={13} />}
+                    </button>
+                    <button onClick={(e) => { e.stopPropagation(); openEditModal('class', cls); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors"><Edit2 size={13} /></button>
+                    <button onClick={(e) => { e.stopPropagation(); toggleArchiveClass(cls.id); }} className="p-1 text-gray-400 hover:text-[#fc9867] transition-colors"><Archive size={13} /></button>
+                    <button onClick={(e) => { e.stopPropagation(); deleteClass(cls.id); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors"><Trash2 size={13} /></button>
+                </div>
+            </div>
+        );
+    };
 
     // One folder block (row + its collapsible group list), shared by the
     // Pinned section and the Groups section so both behave identically.
@@ -2546,7 +2603,7 @@ export default function App() {
                         : (isDark ? 'hover:bg-[#3a373a]/30' : 'hover:bg-[#e1d5e3]/30')
                         }`}
                     onClick={() => toggleFolder(folder.id)}
-                    onContextMenu={(e) => openFolderContextMenu(e, folder.id)}
+                    onContextMenu={(e) => openSidebarContextMenu(e, 'folder', folder.id)}
                 >
                     <div className="flex items-center gap-2 text-sm truncate flex-1">
                         <ChevronDown
@@ -2585,27 +2642,7 @@ export default function App() {
                 >
                     <div className="overflow-hidden">
                         <div className="pl-6 space-y-1 pb-1">
-                            {activeClasses.filter(c => c.folderId === folder.id).map(cls => (
-                                <div
-                                    key={cls.id}
-                                    className={`group flex items-center justify-between p-2 rounded-md cursor-pointer transition-all duration-200 text-sm ${activeClassId === cls.id
-                                        ? (isDark ? 'bg-[#ab9df2]/15 text-[#ab9df2] font-semibold' : 'bg-[#ab9df2]/20 text-[#5c4cb0] font-semibold')
-                                        : (isDark ? 'hover:bg-[#3a373a]/20 text-[#939293]' : 'hover:bg-[#e1d5e3]/20 text-[#726f73]')
-                                        }`}
-                                    onClick={() => { setActiveClassId(cls.id); setSelectedStudents([]); }}
-                                >
-                                    <div className="flex items-center gap-2 truncate">
-                                        <Book size={14} className={activeClassId === cls.id ? 'text-[#ab9df2]' : 'text-gray-400'} />
-                                        <span className="truncate max-w-[120px]" title={cls.name}>{cls.name}</span>
-                                        {cls.isArchived && <span className="text-[10px] bg-[#fc9867]/20 text-[#fc9867] border border-[#fc9867]/30 px-1.5 py-0.5 rounded font-bold">Archive</span>}
-                                    </div>
-                                    <div className="hidden group-hover:flex items-center gap-1">
-                                        <button onClick={(e) => { e.stopPropagation(); openEditModal('class', cls); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors"><Edit2 size={13} /></button>
-                                        <button onClick={(e) => { e.stopPropagation(); toggleArchiveClass(cls.id); }} className="p-1 text-gray-400 hover:text-[#fc9867] transition-colors"><Archive size={13} /></button>
-                                        <button onClick={(e) => { e.stopPropagation(); deleteClass(cls.id); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors"><Trash2 size={13} /></button>
-                                    </div>
-                                </div>
-                            ))}
+                            {activeClasses.filter(c => c.folderId === folder.id).map(cls => renderGroupBlock(cls))}
                             <button
                                 onClick={() => { setEditingItem(null); setModals({ ...modals, class: true }); }}
                                 className="flex items-center gap-2 text-xs text-gray-500 hover:text-blue-600 p-2 w-full text-left transition-colors font-semibold"
@@ -2695,21 +2732,24 @@ export default function App() {
                                 className={`shrink-0 transition-transform duration-200 ${pinnedOpen ? 'rotate-0' : '-rotate-90'}`}
                             />
                             Pinned
-                            {pinnedFolders.length > 0 && (
+                            {(pinnedFolders.length + pinnedClasses.length) > 0 && (
                                 <span className={`ml-auto text-[10px] px-1.5 py-0.5 rounded-full font-bold ${isDark ? 'bg-[#ffd866]/15 text-[#ffd866]' : 'bg-[#ffd866]/30 text-[#8a6d1f]'}`}>
-                                    {pinnedFolders.length}
+                                    {pinnedFolders.length + pinnedClasses.length}
                                 </span>
                             )}
                         </button>
                         <div className={`grid transition-all duration-300 ease-in-out ${pinnedOpen ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'}`}>
                             <div className="overflow-hidden">
                                 <div className="pt-1 space-y-1">
-                                    {pinnedFolders.length === 0 ? (
+                                    {pinnedFolders.length === 0 && pinnedClasses.length === 0 ? (
                                         <div className={`px-2 py-1.5 text-xs leading-relaxed ${themeClasses.textMuted}`}>
-                                            Nothing pinned yet. Right-click a folder (or hover it and press the pin) to list it here.
+                                            Nothing pinned yet. Right-click a folder or group (or hover it and press the pin) to list it here.
                                         </div>
                                     ) : (
-                                        pinnedFolders.map(renderFolderBlock)
+                                        <>
+                                            {pinnedFolders.map(renderFolderBlock)}
+                                            {pinnedClasses.map(cls => renderGroupBlock(cls, true))}
+                                        </>
                                     )}
                                 </div>
                             </div>
@@ -3844,8 +3884,69 @@ export default function App() {
                 </div>
             )}
 
+            {/* --- GROUP ROW CONTEXT MENU (Right-click) --- */}
+            {contextMenu && contextMenu.type === 'class' && contextTargetClass && (
+                <div
+                    className={`fixed z-[110] min-w-[196px] rounded-xl border shadow-2xl py-1.5 overflow-hidden animate-in fade-in zoom-in-95 duration-100 ${themeClasses.cardBg}`}
+                    style={{ left: contextMenu.x, top: contextMenu.y }}
+                    onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                    onClick={(e) => e.stopPropagation()}
+                >
+                    <div className={`px-3 pt-1.5 pb-2 border-b ${themeClasses.border}`}>
+                        <p className={`text-xs font-extrabold truncate ${themeClasses.textPrimary}`}>{contextTargetClass.name}</p>
+                        <p className={`text-[10px] font-semibold truncate ${themeClasses.textMuted}`}>
+                            {contextTargetClass.isPinned ? 'Pinned group' : 'Group'}
+                            {contextTargetClassFolder ? ` · ${contextTargetClassFolder.name}` : ''}
+                        </p>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={() => {
+                            setContextMenu(null);
+                            togglePinClass(contextTargetClass.id);
+                        }}
+                        className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm font-semibold text-left transition-colors ${isDark ? 'hover:bg-[#4a474a] text-[#fcfaf2]' : 'hover:bg-[#f2ece0] text-[#2d2a2e]'}`}
+                    >
+                        {contextTargetClass.isPinned ? <PinOff size={14} className="shrink-0" /> : <Pin size={14} className="shrink-0" />}
+                        {contextTargetClass.isPinned ? 'Unpin Group' : 'Pin Group'}
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => {
+                            setContextMenu(null);
+                            openEditModal('class', contextTargetClass);
+                        }}
+                        className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm font-semibold text-left transition-colors ${isDark ? 'hover:bg-[#4a474a] text-[#fcfaf2]' : 'hover:bg-[#f2ece0] text-[#2d2a2e]'}`}
+                    >
+                        <Edit2 size={14} className="shrink-0" /> Edit Group
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => {
+                            setContextMenu(null);
+                            toggleArchiveClass(contextTargetClass.id);
+                        }}
+                        className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm font-semibold text-left transition-colors ${isDark ? 'hover:bg-[#4a474a] text-[#fcfaf2]' : 'hover:bg-[#f2ece0] text-[#2d2a2e]'}`}
+                    >
+                        <Archive size={14} className="shrink-0" /> {contextTargetClass.isArchived ? 'Unarchive Group' : 'Archive Group'}
+                    </button>
+                    <div className={`my-1 border-t ${themeClasses.border}`} />
+                    <button
+                        type="button"
+                        onClick={() => {
+                            const classId = contextTargetClass.id;
+                            setContextMenu(null);
+                            deleteClass(classId);
+                        }}
+                        className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm font-bold text-left transition-colors ${isDark ? 'hover:bg-[#ff6188]/20 text-[#ff6188]' : 'hover:bg-[#e0466a]/10 text-[#e0466a]'}`}
+                    >
+                        <Trash2 size={14} className="shrink-0" /> Delete Group
+                    </button>
+                </div>
+            )}
+
             {/* --- CONTACT ROW CONTEXT MENU (Right-click) --- */}
-            {contextMenu && contextMenu.type !== 'folder' && (
+            {contextMenu && contextMenu.type === 'contact' && (
                 <div
                     className={`fixed z-[110] min-w-[196px] rounded-xl border shadow-2xl py-1.5 overflow-hidden animate-in fade-in zoom-in-95 duration-100 ${themeClasses.cardBg}`}
                     style={{ left: contextMenu.x, top: contextMenu.y }}
