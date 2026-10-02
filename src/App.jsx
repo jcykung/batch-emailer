@@ -96,6 +96,19 @@ function moveItemInList(list, movingId, targetId, placeAfter) {
     return next;
 }
 
+// Reorder a plain list of ids — same idea as moveItemInList, but the Pinned
+// section's order is a bare list of ids (never folder/group objects).
+function moveIdInList(list, movingId, targetId, placeAfter) {
+    const from = list.indexOf(movingId);
+    if (from < 0 || movingId === targetId) return list;
+    const next = [...list];
+    const [moved] = next.splice(from, 1);
+    const to = next.indexOf(targetId);
+    if (to < 0) return list;
+    next.splice(placeAfter ? to + 1 : to, 0, moved);
+    return next;
+}
+
 // Move a group into a folder: `atEnd` puts it at the bottom of that folder's
 // groups, otherwise at the top (or right after the folder if it has none).
 function moveGroupToFolder(classes, movingId, folderId, atEnd) {
@@ -403,7 +416,7 @@ export {
     parseContactsFromText, buildContactRecords, parseCSV,
     IMPORT_EXAMPLE_PASTE, IMPORT_EXAMPLE_CSV,
     buildExistingContactIndex, planContactImport,
-    moveItemInList, moveGroupToFolder, moveGroupBesideGroup,
+    moveItemInList, moveGroupToFolder, moveGroupBesideGroup, moveIdInList,
     collectSubtreeIds, isDescendantFolder, moveFolderRelative,
     sortByPinnedOrder,
     generateDataFingerprint, compareFingerprints
@@ -955,6 +968,10 @@ export default function App() {
     const [activeFolderId, setActiveFolderId] = useState(null);
     const [activeClassId, setActiveClassId] = useState(null);
     const [expandedFolders, setExpandedFolders] = useState({});
+    // Which folders are open *inside the Pinned section*. Kept apart from
+    // expandedFolders on purpose: opening a favourite there must never pop the
+    // same folder open (or highlight it) down in the Groups tree.
+    const [expandedPinnedFolders, setExpandedPinnedFolders] = useState({});
     const [showArchived, setShowArchived] = useState(false);
     const [sidebarOpen, setSidebarOpen] = useState(true);
     const [expandedStudents, setExpandedStudents] = useState([]);
@@ -1268,8 +1285,13 @@ export default function App() {
         }
     }, [activeFolderId]);
 
+    // Whether the newly selected group's folder should be revealed in the
+    // Groups tree. Selecting a group in the Pinned section clears it first:
+    // the tree stays collapsed and tidy, nothing there opens or lights up.
+    const revealSelectedClassFolderRef = useRef(true);
+
     useEffect(() => {
-        if (activeClassId) {
+        if (activeClassId && revealSelectedClassFolderRef.current) {
             const cls = data.classes.find(c => c.id === activeClassId);
             if (cls && cls.folderId) {
                 setExpandedFolders(prev => ({ ...prev, [cls.folderId]: true }));
@@ -1284,7 +1306,6 @@ export default function App() {
     // longer exists (hand-edited file) is treated as top level so it can never
     // disappear from the sidebar.
     const rootFolders = activeFolders.filter(f => !f.parentId || !data.folders.some(p => p.id === f.parentId));
-    const pinnedFolders = sortByPinnedOrder(activeFolders.filter(f => f.isPinned), pinnedOrder);
     // Parent picker for the folder dialog: never offer the folder being edited
     // or anything inside it (that would file it under its own subtree).
     const folderParentOptions = (() => {
@@ -1310,7 +1331,14 @@ export default function App() {
     const activeClasses = data.classes.filter(c =>
         showArchived ? true : !c.isArchived
     );
-    const pinnedClasses = sortByPinnedOrder(activeClasses.filter(c => c.isPinned), pinnedOrder);
+    // The Pinned section as one flat, freely reorderable list of favourites —
+    // folders and groups interleaved, in whatever order the user dragged them
+    // into. Purely a display order: data.folders/data.classes (and the Groups
+    // tree) are never touched by it.
+    const pinnedItems = sortByPinnedOrder([
+        ...activeFolders.filter(f => f.isPinned).map(f => ({ id: f.id, kind: 'folder', folder: f })),
+        ...activeClasses.filter(c => c.isPinned).map(c => ({ id: c.id, kind: 'class', cls: c }))
+    ], pinnedOrder);
     const currentClass = data.classes.find(c => c.id === activeClassId);
     const classStudents = data.students.filter(s => s.classId === activeClassId);
 
@@ -1360,6 +1388,15 @@ export default function App() {
             [folderId]: !prev[folderId]
         }));
         setActiveFolderId(folderId);
+    };
+
+    // Opening a folder from the Pinned section is local to that section: the
+    // Groups tree keeps its own collapsed state and is never highlighted.
+    const togglePinnedFolder = (folderId) => {
+        setExpandedPinnedFolders(prev => ({
+            ...prev,
+            [folderId]: !prev[folderId]
+        }));
     };
 
     const handleStudentClick = (e, studentId) => {
@@ -1498,6 +1535,8 @@ export default function App() {
         } else {
             const newClass = { id: generateId(), folderId, name, isArchived: false, isPinned: false, createdAt: new Date().toISOString() };
             setData(prev => ({ ...prev, classes: [...prev.classes, newClass] }));
+            // A brand new group should show up in the tree: reveal its folder.
+            revealSelectedClassFolderRef.current = true;
             setActiveClassId(newClass.id);
         }
         closeModals();
@@ -1761,10 +1800,10 @@ export default function App() {
             : { kind: 'class', id, position, zone: 'groups' });
     };
 
-    // Pinned rows accept only another pinned row of the same kind: favourites
-    // reorder among themselves, folders never mix with groups.
+    // Pinned rows accept any other pinned row: the list is one flat order, so
+    // folders and groups can be interleaved — and it stays inside Pinned.
     const overPinnedRow = (e, kind, id) => {
-        if (!dragItem || dragItem.zone !== 'pinned' || dragItem.kind !== kind || dragItem.id === id) return;
+        if (!dragItem || dragItem.zone !== 'pinned' || dragItem.id === id) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
         const position = dropPositionFor(e);
@@ -1823,9 +1862,9 @@ export default function App() {
         const drag = dragItem;
         const position = dropPositionFor(e);
         endSidebarDrag();
-        if (!drag || drag.zone !== 'pinned' || drag.kind !== kind || drag.id === id) return;
-        const shown = [...pinnedFolders.map(f => f.id), ...pinnedClasses.map(c => c.id)];
-        setPinnedOrder(moveItemInList(shown, drag.id, id, position === 'after'));
+        if (!drag || drag.zone !== 'pinned' || drag.id === id) return;
+        const shown = pinnedItems.map(entry => entry.id);
+        setPinnedOrder(moveIdInList(shown, drag.id, id, position === 'after'));
     };
 
     const toggleArchiveClass = (id) => {
@@ -2936,7 +2975,13 @@ export default function App() {
                     ? (isDark ? 'bg-[#ab9df2]/15 text-[#ab9df2] font-semibold' : 'bg-[#ab9df2]/20 text-[#5c4cb0] font-semibold')
                     : (isDark ? 'hover:bg-[#3a373a]/20 text-[#939293]' : 'hover:bg-[#e1d5e3]/20 text-[#726f73]')
                     } ${isDragged ? 'opacity-40' : ''}`}
-                onClick={() => { setActiveClassId(cls.id); setSelectedStudents([]); }}
+                onClick={() => {
+                    // A favourite's row may not open its folder in the Groups
+                    // tree or mark it active down there.
+                    revealSelectedClassFolderRef.current = !inPinned;
+                    setActiveClassId(cls.id);
+                    setSelectedStudents([]);
+                }}
                 onContextMenu={(e) => openSidebarContextMenu(e, 'class', cls.id, zone)}
                 {...dragProps}
             >
@@ -2990,7 +3035,8 @@ export default function App() {
     // file with a folder cycle in it can only ever render 8 levels.
     const renderFolderBlock = (folder, depth = 0, zone = 'groups') => {
         const inPinned = zone === 'pinned';
-        const isOpen = !!expandedFolders[folder.id];
+        // Each section keeps its own open/closed state for the same folder.
+        const isOpen = inPinned ? !!expandedPinnedFolders[folder.id] : !!expandedFolders[folder.id];
         const groupCount = data.classes.filter(c => c.folderId === folder.id && (showArchived ? true : !c.isArchived)).length;
         const subFolders = depth < 8
             ? activeFolders.filter(f => f.parentId === folder.id && f.id !== folder.id)
@@ -3029,7 +3075,7 @@ export default function App() {
                         ? (isDark ? 'bg-[#3a373a] font-semibold text-white' : 'bg-[#e1d5e3]/65 font-semibold text-[#2d2a2e]')
                         : (isDark ? 'hover:bg-[#3a373a]/30' : 'hover:bg-[#e1d5e3]/30')
                         } ${isDragged ? 'opacity-40' : ''} ${dropInto ? 'shadow-[inset_0_0_0_2px_#78dce8,0_0_8px_rgba(120,220,232,0.55)]' : ''}`}
-                    onClick={() => toggleFolder(folder.id)}
+                    onClick={() => (inPinned ? togglePinnedFolder(folder.id) : toggleFolder(folder.id))}
                     onContextMenu={(e) => openSidebarContextMenu(e, 'folder', folder.id, zone)}
                     {...dragProps}
                 >
@@ -3148,24 +3194,24 @@ export default function App() {
                                 className={`shrink-0 transition-transform duration-200 ${pinnedOpen ? 'rotate-0' : '-rotate-90'}`}
                             />
                             Pinned
-                            {(pinnedFolders.length + pinnedClasses.length) > 0 && (
+                            {pinnedItems.length > 0 && (
                                 <span className={`ml-auto text-[10px] px-1.5 py-0.5 rounded-full font-bold ${isDark ? 'bg-[#ffd866]/15 text-[#ffd866]' : 'bg-[#ffd866]/30 text-[#8a6d1f]'}`}>
-                                    {pinnedFolders.length + pinnedClasses.length}
+                                    {pinnedItems.length}
                                 </span>
                             )}
                         </button>
                         <div className={`grid transition-all duration-300 ease-in-out ${pinnedOpen ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'}`}>
                             <div className="overflow-hidden">
                                 <div className="pt-1 space-y-1">
-                                    {pinnedFolders.length === 0 && pinnedClasses.length === 0 ? (
+                                    {pinnedItems.length === 0 ? (
                                         <div className={`px-2 py-1.5 text-xs leading-relaxed ${themeClasses.textMuted}`}>
                                             Nothing pinned yet. Right-click a folder or group (or hover it and press the pin) to list it here.
                                         </div>
                                     ) : (
-                                        <>
-                                            {pinnedFolders.map(f => renderFolderBlock(f, 0, 'pinned'))}
-                                            {pinnedClasses.map(cls => renderGroupBlock(cls, { showFolder: true, zone: 'pinned', pinnedRoot: true }))}
-                                        </>
+                                        pinnedItems.map(entry => (entry.kind === 'folder'
+                                            ? renderFolderBlock(entry.folder, 0, 'pinned')
+                                            : renderGroupBlock(entry.cls, { showFolder: true, zone: 'pinned', pinnedRoot: true })
+                                        ))
                                     )}
                                 </div>
                             </div>
@@ -3971,7 +4017,8 @@ export default function App() {
                                     <li>The header hamburger was replaced by an <strong>arrow handle on the divider</strong> that slides with the sidebar, on desktop and mobile.</li>
                                     <li><strong>Sync &amp; Backup moved to the bottom of the sidebar</strong>, with the "Connected to …" line right above it — and the status light on the button is gone.</li>
                                     <li><strong>Drag &amp; drop:</strong> drag folders to rearrange them, drag groups to reorder them or move them into another folder (dropping on a folder row opens it as you hover), and drop a folder beside a subfolder to file it at that level. The dragged row dims and the landing spot shows a <strong>flat</strong> cyan line — no curved ends — while a folder a group is about to land <em>inside</em> lights up instead of showing a line. A folder can never be dropped inside its own subtree.</li>
-                                    <li><strong>Pinned is favourites only:</strong> its rows shuffle among themselves in their own order (reordering them never moves anything in the Groups tree), and the only action they offer is Unpin — no dragging into folders, no add-subfolder, rename, archive or delete, on hover or right-click.</li>
+                                    <li><strong>Pinned is favourites only:</strong> its rows are one flat list you can drag into any order (folders and groups interleaved), and reordering them never moves anything in the Groups tree. The only action they offer is Unpin — no dragging into folders, no add-subfolder, rename, archive or delete, on hover or right-click.</li>
+                                    <li>Clicking a pinned item no longer opens or highlights its folder in the Groups tree: Pinned keeps its own open/closed state, so a tidy, collapsed Groups section stays that way.</li>
                                     <li><strong>Right-click menus</strong> for folders and groups: Pin, <strong>Add Subfolder</strong> (folders), Rename, Archive and Delete — the same actions are also on each row's hover buttons.</li>
                                     <li><strong>Subfolders</strong> at any depth: the folder dialog gained an "Inside" picker that refuses to file a folder under itself, deleting a folder takes its subfolders, groups and contacts with it, and "Add Group" now creates the group in the folder you actually clicked.</li>
                                     <li>Folder <strong>order and nesting are real data</strong>: they travel inside backups and sync files, count towards the content hash (so a reorder really pushes to your other devices), and are named in the conflict dialog as "folder order / group order / subfolder nesting differs".</li>

@@ -133,6 +133,37 @@ try {
         'every folder row in Groups offers Add subfolder on hover — never one in Pinned'
     );
 
+    // --- Pinned has its own order; the Groups tree keeps data order ---------
+    seed([
+        { id: 'f1', name: 'Alpha', isArchived: false, isPinned: true, createdAt: '2026-01-01T00:00:00.000Z' },
+        { id: 'f2', name: 'Beta', isArchived: false, isPinned: true, createdAt: '2026-01-02T00:00:00.000Z' },
+        { id: 'f3', name: 'Gamma', isArchived: false, isPinned: false, createdAt: '2026-01-03T00:00:00.000Z' }
+    ], [
+        { id: 'g1', folderId: 'f1', name: 'Period 1', isArchived: false, isPinned: true, createdAt: '2026-01-04T00:00:00.000Z' },
+        { id: 'g2', folderId: 'f1', name: 'Chess', isArchived: false, isPinned: true, createdAt: '2026-01-05T00:00:00.000Z' }
+    ]);
+    store.set('batch-emailer-pinned-order', JSON.stringify(['g1', 'f2', 'g2', 'f1']));
+    const orderedHtml = renderToString(React.createElement(App));
+    // The Pinned section renders first, so each name's first hit is its row there.
+    assert.ok(
+        orderedHtml.indexOf('title="Period 1"') < orderedHtml.indexOf('title="Beta"'),
+        'a pinned group can sit above a pinned folder: Pinned is one flat list'
+    );
+    assert.ok(
+        orderedHtml.indexOf('title="Beta"') < orderedHtml.indexOf('title="Alpha"'),
+        'the Pinned list follows the order it was dragged into'
+    );
+    assert.ok(
+        orderedHtml.indexOf('title="Period 1"') < orderedHtml.indexOf('title="Chess"'),
+        'pinned groups keep their dragged order too'
+    );
+    assert.ok(
+        orderedHtml.lastIndexOf('title="Alpha"') < orderedHtml.lastIndexOf('title="Beta"'),
+        'the Groups tree still lists folders in data order'
+    );
+    assert.strictEqual(count(orderedHtml, 'title="Gamma"'), 1, 'an unpinned folder is listed only in Groups');
+    store.delete('batch-emailer-pinned-order');
+
     // --- Order is part of the data (drag & drop reordering) ----------------
     const { getCanonicalData } = await import(outfileUrl.href);
     const orderSeed = [
@@ -211,6 +242,15 @@ try {
         'f1,f2,f3',
         'a missing or corrupt order falls back to the data order'
     );
+
+    // --- Pinned reorder maths (a bare list of ids) -------------------------
+    const { moveIdInList } = await import(outfileUrl.href);
+    const idOrder = ['f1', 'f2', 'f3'];
+    assert.strictEqual(moveIdInList(idOrder, 'f3', 'f1', true).join(','), 'f1,f3,f2', 'a pinned item dropped after another lands beside it');
+    assert.strictEqual(moveIdInList(idOrder, 'f1', 'f3', false).join(','), 'f2,f1,f3', 'a pinned item dropped before another moves up');
+    assert.strictEqual(moveIdInList(idOrder, 'f2', 'f2', true).join(','), 'f1,f2,f3', 'dropping a pinned item on itself changes nothing');
+    assert.strictEqual(moveIdInList(idOrder, 'g9', 'f1', true).join(','), 'f1,f2,f3', 'an unknown id is refused');
+    assert.strictEqual(idOrder.join(','), 'f1,f2,f3', 'the id list itself is never mutated');
 
     // --- Subfolder helpers --------------------------------------------------
     const { collectSubtreeIds, isDescendantFolder, moveFolderRelative } = await import(outfileUrl.href);
@@ -330,12 +370,20 @@ try {
         'the Pinned order is stored on its own, apart from the synced data'
     );
     assert.ok(
+        bundleSource.includes('setPinnedOrder(moveIdInList('),
+        'dropping in Pinned rewrites the pinned order, never the data'
+    );
+    assert.ok(
         bundleSource.includes('drag.zone !== "groups"'),
         'a pinned drag is refused by every drop target in the Groups tree'
     );
     assert.ok(
-        bundleSource.includes('setPinnedOrder(moveItemInList('),
-        'dropping in Pinned rewrites the pinned order, never the data'
+        bundleSource.includes('expandedPinnedFolders') && bundleSource.includes('togglePinnedFolder('),
+        'opening a folder in Pinned uses its own state, so the Groups tree stays as it was'
+    );
+    assert.ok(
+        bundleSource.includes('revealSelectedClassFolderRef'),
+        'selecting a pinned group does not reveal its folder in the Groups tree'
     );
     console.log('✓ Sidebar structure checks passed:');
     console.log('  - Pinned + Groups sections render; the New Folder button became a + beside Groups');
