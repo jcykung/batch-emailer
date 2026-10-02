@@ -3126,26 +3126,6 @@ export default function App() {
                     </button>
                 </div>
 
-                <div className={`p-4 flex flex-col gap-2 border-b transition-colors duration-300 ${isDark ? 'border-[#4a474a]/40' : 'border-[#e1d5e3]/50'}`}>
-                    <button
-                        onClick={() => setModals({ ...modals, backup: true })}
-                        className={`flex items-center justify-center gap-2 w-full py-2 px-3 rounded-lg font-semibold transition-all active:scale-[0.98] ${isDark ? 'bg-[#403e41] text-[#fcfaf2] hover:bg-[#4a474a] border border-[#595559]' : 'bg-[#ffffff] text-[#2d2a2e] hover:bg-[#faf8f2] border border-[#dfd9cd]'
-                            }`}
-                    >
-                        <RefreshCw size={18} className={syncStatus === 'syncing' ? 'animate-spin text-[#78dce8]' : ''} />
-                        <span>Sync & Backup</span>
-                        {syncStatus === 'synced' && (
-                            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 ml-auto flex-shrink-0" title="In Sync"></span>
-                        )}
-                        {syncStatus === 'local-changes' && (
-                            <span className="w-2.5 h-2.5 rounded-full bg-amber-500 ml-auto flex-shrink-0" title="Unsynced local changes"></span>
-                        )}
-                        {syncStatus === 'error' && (
-                            <span className="w-2.5 h-2.5 rounded-full bg-rose-500 ml-auto flex-shrink-0" title="Sync error"></span>
-                        )}
-                    </button>
-                </div>
-
                 {/* Privacy Policy Link */}
                 <button
                     onClick={() => setModals({ ...modals, privacy: true })}
@@ -3153,19 +3133,6 @@ export default function App() {
                 >
                     <FileText size={14} /> Privacy Policy
                 </button>
-
-                {/* Sidebar Backup Reminder Alert */}
-                <div className={`px-4 py-3 mx-4 mt-2 mb-1 rounded-xl border flex gap-2.5 items-start text-xs leading-relaxed ${isDark ? 'bg-[#78dce8]/10 border-[#78dce8]/30 text-[#78dce8]' : 'bg-[#2188a0]/10 border-[#2188a0]/30 text-[#13677a]'
-                    }`}>
-                    <RefreshCw size={15} className="flex-shrink-0 mt-0.5" />
-                    <div>
-                        {syncFileName ? (
-                            <span>Connected to <strong>{syncFileName}</strong>.</span>
-                        ) : (
-                            <span>Connect a <strong>Sync File</strong> for 1-click cloudless sync, or export backups.</span>
-                        )}
-                    </div>
-                </div>
 
                 <div className="flex-1 overflow-y-auto p-3 space-y-4">
                     {/* --- PINNED SECTION (collapsible) --- */}
@@ -3245,11 +3212,33 @@ export default function App() {
                         </div>
                     </div>
                 </div>
-                <div className={`p-3 border-t text-xs flex justify-between items-center ${isDark ? 'bg-zinc-900 border-[#4a474a]' : 'bg-[#e4d6eb] border-[#e1d5e3] text-[#726f73]'}`}>
+                {/* Sidebar footer: the sync file status sits directly above the
+                    Sync & Backup button, which anchors the very bottom. */}
+                <div className={`p-3 border-t space-y-2 text-xs ${isDark ? 'bg-zinc-900 border-[#4a474a]' : 'bg-[#e4d6eb] border-[#e1d5e3] text-[#726f73]'}`}>
                     <label className="flex items-center gap-2 cursor-pointer font-medium">
                         <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} className="rounded text-blue-600 focus:ring-blue-500 cursor-pointer" />
                         Show Archived
                     </label>
+                    {/* Connected-to indicator for the sync file */}
+                    <div className={`px-3 py-2 rounded-xl border flex gap-2.5 items-start text-xs leading-relaxed ${isDark ? 'bg-[#78dce8]/10 border-[#78dce8]/30 text-[#78dce8]' : 'bg-[#2188a0]/10 border-[#2188a0]/30 text-[#13677a]'
+                        }`}>
+                        <RefreshCw size={15} className="flex-shrink-0 mt-0.5" />
+                        <div>
+                            {syncFileName ? (
+                                <span>Connected to <strong>{syncFileName}</strong>.</span>
+                            ) : (
+                                <span>Connect a <strong>Sync File</strong> for 1-click cloudless sync, or export backups.</span>
+                            )}
+                        </div>
+                    </div>
+                    <button
+                        onClick={() => setModals({ ...modals, backup: true })}
+                        className={`flex items-center justify-center gap-2 w-full py-2 px-3 rounded-lg font-semibold transition-all active:scale-[0.98] ${isDark ? 'bg-[#403e41] text-[#fcfaf2] hover:bg-[#4a474a] border border-[#595559]' : 'bg-[#ffffff] text-[#2d2a2e] hover:bg-[#faf8f2] border border-[#dfd9cd]'
+                            }`}
+                    >
+                        <RefreshCw size={18} className={syncStatus === 'syncing' ? 'animate-spin text-[#78dce8]' : ''} />
+                        <span>Sync & Backup</span>
+                    </button>
                 </div>
             </div>
 
@@ -3980,6 +3969,7 @@ export default function App() {
                                     <li>The sidebar is organised into two collapsible sections: <strong>Pinned</strong> on top (with a "Nothing pinned yet" hint) and <strong>Groups</strong> below it, which holds the full folder tree. The standalone New Folder button became a <strong>+</strong> on the Groups header.</li>
                                     <li>Pin a folder <em>or</em> a group — hover for the pin icon, or right-click → Pin — and it is listed in Pinned while staying in its place in the tree.</li>
                                     <li>The header hamburger was replaced by an <strong>arrow handle on the divider</strong> that slides with the sidebar, on desktop and mobile.</li>
+                                    <li><strong>Sync &amp; Backup moved to the bottom of the sidebar</strong>, with the "Connected to …" line right above it — and the status light on the button is gone.</li>
                                     <li><strong>Drag &amp; drop:</strong> drag folders to rearrange them, drag groups to reorder them or move them into another folder (dropping on a folder row opens it as you hover), and drop a folder beside a subfolder to file it at that level. The dragged row dims and the landing spot shows a <strong>flat</strong> cyan line — no curved ends — while a folder a group is about to land <em>inside</em> lights up instead of showing a line. A folder can never be dropped inside its own subtree.</li>
                                     <li><strong>Pinned is favourites only:</strong> its rows shuffle among themselves in their own order (reordering them never moves anything in the Groups tree), and the only action they offer is Unpin — no dragging into folders, no add-subfolder, rename, archive or delete, on hover or right-click.</li>
                                     <li><strong>Right-click menus</strong> for folders and groups: Pin, <strong>Add Subfolder</strong> (folders), Rename, Archive and Delete — the same actions are also on each row's hover buttons.</li>
