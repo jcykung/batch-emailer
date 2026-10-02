@@ -490,7 +490,9 @@ function getDeviceId() {
     return id;
 }
 
-function getDeviceName() {
+// The machine, from the user agent. Used only as a display label — it never
+// enters the content hash, so it can't make two devices disagree.
+function getDeviceModel() {
     const ua = navigator.userAgent;
     if (/iPhone/i.test(ua)) return "iPhone";
     if (/iPad/i.test(ua)) return "iPad";
@@ -500,7 +502,29 @@ function getDeviceName() {
     if (/Windows/i.test(ua)) return "PC";
     if (/Android/i.test(ua)) return "Android";
     if (/Linux/i.test(ua)) return "Linux";
+    return "";
+}
+
+// The browser, from the user agent. Edge and Opera both report "Chrome/..." in
+// their user agent, and Safari reports "Safari/...", so the masks are checked
+// before the engine they hide.
+function getBrowserName() {
+    const ua = navigator.userAgent;
+    if (/Edg\//i.test(ua)) return "Edge";
+    if (/OPR\/|Opera\//i.test(ua)) return "Opera";
+    if (/Firefox\//i.test(ua)) return "Firefox";
+    if (/Chrome\/|CriOS\//i.test(ua)) return "Chrome";
+    if (/Safari\//i.test(ua)) return "Safari";
     return "Browser";
+}
+
+// "MacBook · Chrome" — the label written into every sync file so another
+// machine can say exactly where the file was last modified, and shown in the
+// conflict modal next to both sides of a disagreement.
+function getDeviceName() {
+    const device = getDeviceModel();
+    const browser = getBrowserName();
+    return device ? `${device} · ${browser}` : browser;
 }
 
 const SYNC_META_KEY = 'batch-emailer-sync-meta';
@@ -4023,6 +4047,8 @@ export default function App() {
                                     <li><strong>Subfolders</strong> at any depth: the folder dialog gained an "Inside" picker that refuses to file a folder under itself, deleting a folder takes its subfolders, groups and contacts with it, and "Add Group" now creates the group in the folder you actually clicked.</li>
                                     <li>Folder <strong>order and nesting are real data</strong>: they travel inside backups and sync files, count towards the content hash (so a reorder really pushes to your other devices), and are named in the conflict dialog as "folder order / group order / subfolder nesting differs".</li>
                                     <li>The sync status dot no longer lights up after a sync that the warning bar already completed.</li>
+                                    <li>The external-update warning bar and the conflict dialog now name the <strong>browser as well as the computer</strong> that last modified the sync file — "MacBook · Chrome" instead of just "MacBook".</li>
+                                    <li>The sync &amp; backup architecture, including how this warning bar works, is written up in <code>SYNC_AND_BACKUP_SYSTEM.md</code> as a portable guide for reuse in other apps.</li>
                                     <li>Verification covers all of this: <code>npm run verify</code> now also server-renders the sidebar and round-trips a reordered, nested dataset through the backup file.</li>
                                 </ul>
                             </div>

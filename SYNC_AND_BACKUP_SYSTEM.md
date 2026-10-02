@@ -11,6 +11,9 @@ This architecture enables:
    - **Non-FSA Browsers (Safari, Firefox, Brave, iOS, Android)**: Seamless fallback via `<input type="file">`, Web Share API, and download streams.
    - **Cross-Platform Safety**: Resilient against Windows UTF-8 BOM markers, line ending variations (`\r\n` vs `\n`), and base64 whitespace formatting.
 5. **Conflict Resolution & Fingerprinting**: Automatic 3-way synchronization logic with visual difference comparison.
+6. **A warning bar when another machine got there first**: open the app on a second computer or browser and, if the browser's data differs from the sync file, a bar appears at the top of the screen saying which computer *and browser* last modified the file, with a **Sync Now** button right there. [→ §8](#8-the-external-update-warning-bar)
+7. **Trust, but verify**: every file that gets written is read back and proven complete before it counts as saved, and storage-full errors, dead file handles and raw `DOMException`s become messages a person can act on. [→ §12](#12-guard-rails--hardening-in-this-app)
+8. **Ready to reuse**: [§13](#13-porting-checklist-for-your-other-apps) is a rename-and-go checklist for rebuilding the sync & backup system of another one of your apps.
 
 ---
 
@@ -22,10 +25,14 @@ This architecture enables:
 4. [Change Detection & Fast Hashing](#4-change-detection--fast-hashing)
 5. [Storage: Storing File Handles in IndexedDB](#5-storage-storing-file-handles-in-indexeddb)
 6. [The Sync Decision Engine](#6-the-sync-decision-engine)
-7. [Fingerprinting & Difference Engine](#7-fingerprinting--difference-engine)
-8. [Backup & Restore Flow](#8-backup--restore-flow)
-9. [Cross-Browser & Platform Quirks](#9-cross-browser--platform-quirks)
-10. [Reference Implementation (Copy-Paste Modules)](#10-reference-implementation)
+7. [Device Identity & Sync Metadata](#7-device-identity--sync-metadata)
+8. [The External-Update Warning Bar](#8-the-external-update-warning-bar)
+9. [Fingerprinting & Difference Engine](#9-fingerprinting--difference-engine)
+10. [Backup & Restore Flow](#10-backup--restore-flow)
+11. [Cross-Browser & Platform Quirks](#11-cross-browser--platform-quirks)
+12. [Guard Rails & Hardening](#12-guard-rails--hardening-in-this-app)
+13. [Porting Checklist](#13-porting-checklist-for-your-other-apps)
+14. [Reference Implementation (Copy-Paste Modules)](#14-reference-implementation)
 
 ---
 
@@ -67,6 +74,11 @@ readSyncFile(handle)                                   read file from event
          |                           |                           |
   Mark in-sync                Auto-update data         openSyncConflictModal()
 ```
+
+---
+
+> [!NOTE]
+> **Before any of that runs**, the app checks the connected file for changes it did not write itself — on startup, on tab focus and on window focus. If the file has moved on, a **warning bar** drops in under the header naming the computer and browser that last modified it, with a **Sync Now** button (see [§8](#8-the-external-update-warning-bar)). The bar only *reports*; the decision engine above still decides between pull, push and conflict.
 
 ---
 
@@ -167,7 +179,7 @@ const backup = {
     revision: 1,                          // Monotonic integer counter
     timestamp: Date.now(),
     deviceId: getDeviceId(),              // Persistent UUID stored in localStorage
-    deviceName: getDeviceName(),          // e.g. "Mac - Chrome"
+    deviceName: getDeviceName(),          // e.g. "MacBook · Chrome"
     contentHash: contentHash,             // SHA-256 of canonical data
     summary: {
       itemCount: items.length,
@@ -182,6 +194,23 @@ const backup = {
   legacyFields: ...
 };
 ```
+
+### 3.1 Three places data can live — and the rule for each
+
+Decide *where* a piece of information goes before you write it. Getting this wrong is the #1 cause of phantom conflicts ("I only changed my theme and my laptop says the file disagrees").
+
+| Lives | Examples | Rule |
+| :--- | :--- | :--- |
+| **In the file** | the real content: folders/groups/contacts, order and nesting, message history, settings | Travels to every device; restored by "Replace All Data". |
+| **In the content hash** | those same content fields, canonicalised and sorted by id | Anything here **can cause a conflict**. Keep it to what the user would call "my data". |
+| **Only in this browser** | device identity, theme, per-device orders (e.g. the Pinned list), collapsed/expanded state | Never enters the file and never enters the hash. |
+
+How this app splits it:
+
+* `batch-emailer-pinned-order` (the sidebar's Pinned drag order) is deliberately **per device** — reordering favourites on your laptop must not read as a data change on your desktop, and it is not part of the backup.
+* `settings` (the theme) **is** written into the file so a restore brings it back, but is kept **out** of `contentHash`: a theme change alone can never trigger a sync conflict.
+* `deviceId` / `deviceName` live in the `syncMeta` header only — they are *about* the file, not *in* it (see [§7](#7-device-identity--sync-metadata)).
+* The canonical payload keeps only content fields (`id`, `name`, parent pointer, `updatedAt`, records sorted by id). Fields added later to your UI should not silently join the hash — that turns an upgrade into a one-time "conflict" on every machine.
 
 ---
 
@@ -247,6 +276,8 @@ async function computeDataHash(canonicalData) {
 
 The File System Access API provides a `FileSystemFileHandle`. While `localStorage` can only store strings, **IndexedDB can store serializable structured clones, including `FileSystemHandle` objects.**
 
+### 5.1 Minimal version
+
 ```javascript
 const SYNC_DB_NAME = "MyAppSyncDB";
 const SYNC_DB_STORE = "sync_handles";
@@ -299,6 +330,60 @@ async function clearSyncHandle() {
   });
 }
 ```
+
+### 5.2 The hardened version this app ships
+
+The snippet above is enough for a greenfield app, but it breaks in exactly three ways that are painful to debug in production. This app's `src/syncStorage.js` handles all three:
+
+**One database, several stores.**
+
+```javascript
+export const SYNC_DB_NAME    = "BatchEmailerSyncDB";
+export const SYNC_DB_STORE   = "sync_handles";   // key: "activeSyncHandle"
+export const AUTO_BACKUP_STORE = "auto_backups"; // keyPath: "id"
+```
+
+**1 · Migrate on upgrade, and repair a stale layout.** IndexedDB only runs an upgrade when the *version* changes. If an older build created the database at the same version you just opened, no upgrade runs, your new store never appears, and the first transaction throws *"One of the specified object stores was not found"*. So: create missing stores during `onupgradeneeded`, copy the legacy key across, and — after `onsuccess` — check that every required store actually exists, close, bump the version and reopen once:
+
+```javascript
+req.onsuccess = () => {
+  const db = req.result;
+  const missing = REQUIRED_STORES.filter(s => !db.objectStoreNames.contains(s));
+  if (missing.length === 0) return succeed(watchConnection(db));
+
+  db.close();
+  if (allowRepair) {
+    // An older build created this DB at this version, so no upgrade ran.
+    openSyncDB({ version: Math.floor(db.version) + 1, allowRepair: false }).then(succeed, fail);
+  } else {
+    // Second attempt failed too: give an instruction instead of looping forever.
+    fail(new Error("Sync storage is missing its data stores — clear this site's data, then import your backup again."));
+  }
+};
+```
+
+Never open with a version **lower** than the one already on disk — the browser rejects that with a `VersionError`. And delete the legacy store only *after* the copied handle has been written; a failed migration must never abort the upgrade.
+
+**2 · Say why the database is busy.** `req.onblocked` fires when another tab holds an older version open. Turn it into a sentence: *"Sync storage is busy in another tab — close the other tabs of this app and try again."*
+
+**3 · Assume the connection can die under you.** The browser may drop a cached connection; the next `db.transaction(...)` throws `InvalidStateError`. Wrap every call so it reopens once and retries:
+
+```javascript
+async function withSyncDB(fn) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const db = await openSyncDB();
+    try {
+      return await fn(db);
+    } catch (error) {
+      const stale = cachedConnection === db && error?.name === "InvalidStateError";
+      if (!stale || attempt === 1) throw error;
+      closeSyncDB(); // next loop reopens a fresh connection
+    }
+  }
+}
+```
+
+Also register `db.onversionchange` / `db.onclose` to drop the cache and close — otherwise this tab blocks every other tab's upgrade forever.
 
 ---
 
@@ -386,11 +471,210 @@ async function executeSyncResolution({ parsed, file, handle = null, isFirstSetup
 
 ---
 
-## 7. Fingerprinting & Difference Engine
+## 7. Device Identity & Sync Metadata
+
+Everything in this section exists so the app can answer three questions later: *who wrote this file?*, *has the file changed since we last looked?*, *are we the ones behind?* Those answers are what power the warning bar in [§8](#8-the-external-update-warning-bar).
+
+### 7.1 Two identifiers, two jobs
+
+```javascript
+// 1. A stable id for this browser profile + origin — a UUID written once to
+//    localStorage. It identifies an *install*, not a machine: clearing site
+//    data creates a new one. Used to recognise "this file was written by us".
+function getDeviceId() {
+  let id = localStorage.getItem("yourapp-device-id");
+  if (!id) {
+    id = (typeof crypto.randomUUID === "function")
+      ? crypto.randomUUID()
+      : "dev-" + Date.now() + "-" + Math.random().toString(36).slice(2, 9);
+    localStorage.setItem("yourapp-device-id", id);
+  }
+  return id;
+}
+
+// 2. A human label *for the user*, written into syncMeta and shown in the
+//    warning bar and the conflict modal: "MacBook · Chrome".
+function getBrowserName() {
+  const ua = navigator.userAgent;
+  if (/Edg\//i.test(ua)) return "Edge";          // Edge also reports "Chrome/…"
+  if (/OPR\/|Opera\//i.test(ua)) return "Opera"; // …and so does Opera
+  if (/Firefox\//i.test(ua)) return "Firefox";
+  if (/Chrome\/|CriOS\//i.test(ua)) return "Chrome";
+  if (/Safari\//i.test(ua)) return "Safari";     // …and Chrome reports "Safari/…"
+  return "Browser";
+}
+
+function getDeviceName() {
+  const device = getDeviceModel();               // iPhone / iPad / MacBook / PC / …
+  const browser = getBrowserName();
+  return device ? `${device} · ${browser}` : browser;
+}
+```
+
+> [!IMPORTANT]
+> Check the user-agent masks **longest first**: Edge and Opera both advertise `Chrome/`, and Chrome advertises `Safari/`. A naive `if (ua.includes("Safari")) return "Safari"` labels every Chromium browser as Safari — in the message that tells your user which machine touched their file.
+>
+> `getDeviceName()` is **display only**. It goes into the `syncMeta` header and never into the canonical payload; otherwise every write from a new browser would look like a content change (see [§3](#3-unified-data-schema)).
+>
+> Files written by older builds carry just the machine (`MacBook`). The bar shows whatever the file holds, so there is nothing to migrate — the label only becomes more specific as devices rewrite the file.
+
+### 7.2 The `syncMeta` store in localStorage
+
+The file carries a `syncMeta` header; the browser keeps its own copy of the *same keys* so it can be compared without opening the file. One store, shallow-merged on every write:
+
+```javascript
+const SYNC_META_KEY = "yourapp-sync-meta";
+
+function getSyncMeta() {
+  try {
+    const raw = localStorage.getItem(SYNC_META_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch { return {}; }
+}
+
+function setSyncMeta(updates) {
+  const next = { ...getSyncMeta(), ...updates };
+  localStorage.setItem(SYNC_META_KEY, JSON.stringify(next));
+  return next;
+}
+```
+
+| Key | Written when | Read to decide |
+| :--- | :--- | :--- |
+| `fileName` | a file is connected | "is sync configured at all?" |
+| `lastSyncedAt` | a sync completes | compared with `file.lastModified` → "is the file newer?" |
+| `lastSyncedContentHash` | a sync completes | SHA-256 test → "is the file *actually* different?" |
+| `baseContentHash` | a sync completes | the **three-way base** of [§6](#6-the-sync-decision-engine) |
+| `baseRevision` | a sync completes | monotonic counter feeding the push path |
+| `baseFastHash` | a sync completes | "is the current state just what the last sync wrote?" (see §12.2) |
+| `lastLocalChange` | every local edit | `lastLocalChange > lastSyncedAt` → "we owe a push" |
+| `externalUpdateAvailable` / `externalUpdateAuthor` | the bar detects a remote edit | rebuild the warning bar after a reload (see §8.4) |
+
+### 7.3 Name your copy
+
+Prefix every key and DB with your app. Two apps served from the same origin share `localStorage` and IndexedDB — colliding on one key silently mixes two apps' data.
+
+---
+
+## 8. The External-Update Warning Bar
+
+The most user-visible piece of this architecture: **open the app on a second computer or browser, and if what is on screen no longer matches the sync file, a bar appears directly under the header** saying which computer — and which browser — last modified the file, with a **Sync Now** button one click away.
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│  App header                                theme   Sync & Backup│
+├────────────────────────────────────────────────────────────────┤
+│  ⟳  "batch_sync.json" was updated on MacBook · Chrome —        │
+│     click Sync Now to pull.         [ Sync Now ]          [ × ] │ ← warning bar
+├────────────────────────────────────────────────────────────────┤
+│                                                                │
+│                          main content                          │
+│                                                                │
+```
+
+### 8.1 It reports; it never decides
+
+This is the decision worth copying. The bar knows exactly one thing: *"the file is ahead of us, and here is who wrote it."* Pressing **Sync Now** runs the normal decision engine ([§6](#6-the-sync-decision-engine)):
+
+* no local edits → silent **pull**,
+* only local edits → silent **push**,
+* both sides changed → the **conflict modal** with a per-record diff.
+
+Never let a notification overwrite data. If a bar were allowed to "just take the file", one stray window-focus event while you are typing could wipe out unsaved work.
+
+### 8.2 All four conditions must hold
+
+```javascript
+async function checkForExternalChanges() {
+  if (!(window.showSaveFilePicker || window.showOpenFilePicker)) return; // 1. FSA only — see §11
+  const meta = getSyncMeta();
+  if (!meta.fileName) return;                                          // 2. a file is connected
+  const handle = await getSyncHandle();                                // 3. a handle is stored
+  if (!handle) return;
+  if (await handle.queryPermission({ mode: "readwrite" }) !== "granted") return;
+
+  const file = await handle.getFile();
+  if (file.lastModified <= (meta.lastSyncedAt || 0)) return;           // 4a. newer than our last sync
+
+  const parsed = await parseExport(await file.text());
+  const fileHash = await computeDataHash(getCanonicalData(normalizeImportedData(parsed)));
+  if (!fileHash || fileHash === meta.lastSyncedContentHash) return;    // 4b. actually different
+
+  setSyncMeta({
+    externalUpdateAvailable: true,
+    externalUpdateAuthor: parsed.syncMeta?.deviceName || ""
+  });
+  const author = parsed.syncMeta?.deviceName ? ` on ${parsed.syncMeta.deviceName}` : "";
+  setExternalBanner(`"${meta.fileName}" was updated${author} — click Sync Now to pull.`);
+  setSyncStatus("external-update");
+}
+```
+
+Condition **4b** is what keeps the bar honest: a file that was rewritten with *identical* content (an "already in sync" run, a cloud client re-saving it, an editor reformatting it) raises **no** warning. `file.lastModified` alone would cry wolf, and a warning people can't trust is worse than no warning.
+
+### 8.3 When it looks
+
+```javascript
+useEffect(() => { initSync(); }, []);   // mount: rebuild from the stored flag, then check
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") checkForExternalChanges();
+});
+window.addEventListener("focus", checkForExternalChanges);
+```
+
+Returning to the tab after editing on another machine is enough — no refresh, no polling timer, no server.
+
+### 8.4 The warning survives a reload
+
+The flag and the author are stored in `syncMeta`, so on the next mount the bar is rebuilt *before* any file is read:
+
+```javascript
+if (meta.externalUpdateAvailable && currentFileName) {
+  setSyncStatus("external-update");
+  const author = meta.externalUpdateAuthor ? ` on ${meta.externalUpdateAuthor}` : "";
+  setExternalBanner(`"${currentFileName}" was updated${author} — click Sync Now to pull.`);
+}
+```
+
+Both are cleared the moment a sync actually runs, and re-set by whatever the engine finds. A dismissed-but-unsynced warning therefore comes back on the next visit — deliberately, because the difference is still there.
+
+### 8.5 The markup
+
+A full-width strip under the header — **not** a modal, so it never blocks work and never steals focus — with one primary button and a dismiss:
+
+```jsx
+{externalBanner && (
+  <div className="px-4 py-2 text-xs font-semibold flex items-center justify-between border-b ...">
+    <div className="flex items-center gap-2 truncate mr-2">
+      <RefreshCw size={14} />
+      <span className="truncate">{externalBanner}</span>
+    </div>
+    <div className="flex items-center gap-2 shrink-0">
+      <button onClick={autoSync}>Sync Now</button>
+      <button onClick={() => setExternalBanner(null)} title="Dismiss">×</button>
+    </div>
+  </div>
+)}
+```
+
+Set the status to `external-update` at the same moment, so the Sync & Backup screen can say the same thing in full ("Another device updated the file…") alongside the two device labels in the conflict modal ([§9](#9-fingerprinting--difference-engine)).
+
+### 8.6 Porting notes
+
+* **This bar needs the File System Access API.** Only Chromium can silently re-open a file you connected earlier. On Safari/Firefox/mobile there is no handle to poll — do one of these instead of staying silent:
+  * flag **your own** unsynced work with the same bar, different text ("You have changes that are not in the file yet"), and/or
+  * show the same "updated on …" message when the user re-picks the file at sync time; the engine then pulls or conflicts as usual.
+* Put the **file name** in the message (people run more than one), the writing **device + browser**, and the verb (`Sync Now`).
+* If `queryPermission()` returns `"prompt"`, you cannot read the file yet — do **not** show the bar, it would promise information you don't have. Ask for permission from the Sync button instead.
+* Clear both the stored flag and the visible strip when a sync runs. A bar that survives a successful sync teaches people to ignore it.
+
+---
+
+## 9. Fingerprinting & Difference Engine
 
 The fingerprinting engine summarizes dataset state and pinpoints exact additions, removals, and modifications between datasets.
 
-### 7.1 Generating a Fingerprint
+### 9.1 Generating a Fingerprint
 
 ```javascript
 function generateDataFingerprint(data = null) {
@@ -414,7 +698,7 @@ function generateDataFingerprint(data = null) {
 }
 ```
 
-### 7.2 Comparing Fingerprints
+### 9.2 Comparing Fingerprints
 
 > [!CAUTION]
 > Always attach the actual `items` array to difference objects. Do not just attach a text description; otherwise, modal templates that iterate over `diff.items.forEach(...)` will throw a fatal `TypeError`.
@@ -475,9 +759,9 @@ function compareFingerprints(localFP, fileFP) {
 
 ---
 
-## 8. Backup & Restore Flow
+## 10. Backup & Restore Flow
 
-### 8.1 Exporting (Create Backup File)
+### 10.1 Exporting (Create Backup File)
 
 Exporting simply calls `buildSyncJSON()`, ensuring complete interchangeability:
 
@@ -505,7 +789,7 @@ async function exportAllFilesJSON() {
 }
 ```
 
-### 8.2 Restoring (Restore Backup File)
+### 10.2 Restoring (Restore Backup File)
 
 ```javascript
 async function restoreFromBackup(event) {
@@ -529,7 +813,7 @@ async function restoreFromBackup(event) {
 }
 ```
 
-### 8.3 Restore Options: Replace All vs Import New
+### 10.3 Restore Options: Replace All vs Import New
 
 The restore modal presents two distinct choices:
 1. **Replace All Data**: Wipes local data and completely loads the file. If the file has `syncMeta`, it updates `lastSyncedContentHash` and `baseRevision` so subsequent syncs do not detect false conflicts.
@@ -537,9 +821,9 @@ The restore modal presents two distinct choices:
 
 ---
 
-## 9. Cross-Browser & Platform Quirks
+## 11. Cross-Browser & Platform Quirks
 
-### 9.1 Chrome & Arc vs Safari & Brave
+### 11.1 Chrome & Arc vs Safari & Brave
 
 | Browser | File System Access API | Background Disk Sync | Why? |
 | :--- | :--- | :--- | :--- |
@@ -547,7 +831,7 @@ The restore modal presents two distinct choices:
 | **Safari** | Not Supported | **No (Manual)** | WebKit formally opposes FSA for user files on privacy/security grounds. Requires `<input type="file">`. |
 | **Brave** | Supported | **Configurable** | Brave Shields blocks/wipes persistent disk handles in IndexedDB by default as an anti-fingerprinting measure. |
 
-### 9.2 Handling Brave
+### 11.2 Handling Brave
 
 In Brave, Chromium's **File System Access API is disabled by default** behind an internal browser flag for privacy protection. Even if the standard setting is toggled to "Sites can ask to edit files and folders", the browser completely omits `window.showOpenFilePicker` unless the underlying flag is enabled:
 1. Navigate to: `brave://flags/#file-system-access-api`
@@ -555,7 +839,7 @@ In Brave, Chromium's **File System Access API is disabled by default** behind an
 3. Relaunch Brave.
 4. Brave will now support `window.showOpenFilePicker`, show the permission popup on first sync, and persist the handle in IndexedDB across sessions just like Chrome and Arc.
 
-### 9.3 Windows UTF-8 BOM
+### 11.3 Windows UTF-8 BOM
 
 Windows PowerShell, Notepad, and certain text utilities often prefix exported files with bytes `EF BB BF` (`\uFEFF`). `JSON.parse` in V8/WebKit will throw:
 ```
@@ -568,7 +852,140 @@ text = text.replace(/^\uFEFF/, "").trim();
 
 ---
 
-## 10. Reference Implementation
+## 12. Guard Rails & Hardening in This App
+
+Each item below is small, and each one exists because without it the system does something the user cannot undo.
+
+### 12.1 Read every write back before trusting it
+
+After building and encrypting a sync/backup file, the app decrypts **the string it just produced**, normalizes it, and compares the folder / group / contact / email-message counts (and the content hash) against what was meant to be written:
+
+```javascript
+async function verifyBackupRoundTrip(jsonStr, sourceData, sourceSettings) {
+  const roundTrip = await parseExport(jsonStr);          // decrypt what we wrote
+  const expected = getDataSummary(sourceData);           // counts we meant to store
+  const actual = getDataSummary(normalizeImportedData(roundTrip));
+  // …compare, then throw with a sentence a human can act on
+}
+```
+
+Any mismatch throws and the save **fails loudly** instead of leaving a truncated file that silently becomes the new truth. When you port this, write a `verify…RoundTrip()` around *your* completeness counts.
+
+### 12.2 A pull is not an edit
+
+The effect that tracks local edits compares the fresh state with `baseFastHash` first:
+
+```javascript
+const matchesSyncedBase = !!meta.baseFastHash
+  && computeDataHashSync(getCanonicalData(data)) === meta.baseFastHash;
+
+if (matchesSyncedBase) {
+  // This is the content a sync just wrote into app state — not an edit.
+  // Drop a stale "unsynced edits" flag and report what is actually left.
+} else {
+  setSyncMeta({ lastLocalChange: Date.now() });
+  setSyncStatus("local-changes");
+}
+```
+
+Without this, a **pull** writes new content into state, the effect sees "changed", stamps `lastLocalChange` and lights the Sync button *after* a sync that already succeeded. The same trap sits in `autoSync()`'s `finally`: it only settles the status when it is still `'syncing'`, because the `data` captured there is the pre-pull copy.
+
+### 12.3 "Do we owe a push?" in one function
+
+```javascript
+function syncNeedsPush(currentData) {
+  if (!meta.fileName) return false;
+  if ((meta.lastLocalChange || 0) > (meta.lastSyncedAt || 0)) return true;
+  if (currentData && meta.baseFastHash
+      && computeDataHashSync(getCanonicalData(currentData)) !== meta.baseFastHash) return true;
+  return false;
+}
+```
+
+It drives the status light, the status text, and the `beforeunload` guard that warns before you close a tab with unsynced work.
+
+### 12.4 Storage failures are surfaced, never swallowed
+
+A rejected `localStorage.setItem` means the newest edits — email messages included — live only until reload. The write helper forwards the error to state, and a dialog says exactly that, telling the user to download a backup now:
+
+```javascript
+const isQuota = e.name === "QuotaExceededError"
+  || e.name === "NS_ERROR_DOM_QUOTA_REACHED"      // Firefox
+  || e.name === "QUOTA_EXCEEDED_ERR"              // legacy WebKit
+  || /quota|storage|exceed/i.test(e.message || ""); // engines that only set a message
+```
+
+The three spellings plus a text match are needed because engines disagree on how quota exhaustion is reported.
+
+### 12.5 Errors are translated before they are shown
+
+`describeSyncError()` turns IndexedDB/permission `DOMException`s into an instruction ("choose the file again", "reconnect"), and a dead file handle (renamed, moved, permission lost) is cleared automatically so the next sync re-picks the file instead of failing forever. A raw `e.message` is never the final UI.
+
+### 12.6 An automatic browser backup on every change
+
+Every change is also written to IndexedDB, so a user who never connects a file still has a last-known-good copy inside the browser and "Restore from Backup" keeps working for them. It closes the "I never set sync up" data-loss hole for the cost of one structured-clone write per change.
+
+### 12.7 Merge, don't overwrite, on import
+
+"Import New Items Only" and the contact-level merge union the message histories and keep the newest subject/timestamp (`mergeContactRecords`) rather than skipping entities that exist on both sides. Two machines working on the same contact converge instead of one silently winning.
+
+### 12.8 Status is derived, never assumed
+
+`idle | synced | local-changes | external-update | syncing | error` is recomputed from `syncMeta` after every operation, so a cancelled file picker, a permission denial or a conflict modal cannot leave a green light on.
+
+### 12.9 Verification scripts — the part to copy first
+
+`npm run verify` runs three Node scripts that bundle the app source with esbuild (JSX included), stub `localStorage` / `navigator` / `window` / `document`, and assert behaviour with no browser at all:
+
+| Script | What it proves |
+| :--- | :--- |
+| `verify-backup` | file round-trip, hashes, counts, order & nesting, merge behaviour |
+| `verify-import` | contact-import parsers and the review step |
+| `verify-sidebar` | server-rendered sidebar, drag-order helpers, and that the **shipped bundle** still contains the handlers/menus |
+
+They finish in about a second, which is why the sync logic can be changed confidently. When you port the architecture, port the harness as well as the code.
+
+---
+
+## 13. Porting Checklist for Your Other Apps
+
+### 13.1 The rename table
+
+| Thing | In this app | What to change |
+| :--- | :--- | :--- |
+| `localStorage` prefix | `batch-emailer-*` (`theme`, `device-id`, `sync-meta`, `pinned-order`) | your prefix — same-origin apps share storage |
+| IndexedDB | db `BatchEmailerSyncDB`, stores `sync_handles` + `auto_backups` | unique DB/store names (§5.2 covers migration & repair) |
+| Encryption | `EXPORT_KEY` passkey + `EXPORT_MARKER` (`…-encrypted-v1`) | unique key **and** marker; the marker stops a foreign file being parsed as yours |
+| Canonical payload | `getCanonicalData()` → folders / groups / contacts + their order | your content entities, sorted by id, content fields only |
+| File payload | `buildBackupPayload()` → `folders`, `classes`, `students`, `settings` + `syncMeta` | your entities; keep the `syncMeta` shape identical |
+| Completeness counts | `getDataSummary()` / `describeDataSummary()` (…`messageCount`) | counts that prove *your* file is complete |
+| Fingerprint & diff | `generateDataFingerprint()` / `compareFingerprints()` | name + count + `updatedAt` per entity, and attach the **real arrays** |
+| Device identity | `getDeviceId()` / `getDeviceName()` | same code, different keys |
+| Default file name | `batch_emailer_sync.json` | yours |
+| UI copy | "Sync Now", status texts, conflict modal labels | your app's nouns |
+
+### 13.2 Order of work
+
+1. **Pure core first** — crypto encode/decode, canonicalisation, fast + cryptographic hashes — with a Node unit test.
+2. **`syncMeta` + device identity** — one localStorage store, the keys in [§7.2](#72-the-syncmeta-store-in-localstorage).
+3. **Decision engine** — implement the [§6](#6-the-sync-decision-engine) matrix, one fixture per row.
+4. **Round-trip verification** — write, read back, compare counts — *before* adding features.
+5. **Warning bar** — [§8](#8-the-external-update-warning-bar): detect on mount/focus, persist the flag, define the non-FSA fallback.
+6. **Guard rails** — quota, error translation, `beforeunload`, derived status (§12).
+7. **Regression scripts** — bundle + stub + assert, wired to one `npm run verify` command.
+
+### 13.3 Easy ways to get it wrong
+
+* Hashing anything that is not content — a device name, a per-save timestamp, a per-device order — makes every machine permanently disagree.
+* Trusting `file.lastModified` alone; always **also** compare a content hash.
+* Clearing the "external update" flag before a sync has actually run (or never clearing it).
+* Keeping per-device UI state in the file, so a drag reorder on one device becomes a conflict on another.
+* Auto-applying a file because a notification appeared — the bar reports, the engine decides.
+* Forgetting the BOM strip / line-ending normalisation before `JSON.parse` ([§11.3](#113-windows-utf-8-bom)).
+
+---
+
+## 14. Reference Implementation
 
 Here are the complete, production-ready modules to drop into your application:
 
