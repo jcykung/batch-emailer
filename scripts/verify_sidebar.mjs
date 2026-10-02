@@ -127,7 +127,11 @@ try {
     );
     assert.strictEqual(count(subHtml, 'title="Loose"'), 1, 'a top-level folder stays at the top level');
     assert.strictEqual(count(subHtml, 'title="Sub Class"'), 2, 'a group inside a subfolder renders with it');
-    assert.strictEqual(count(subHtml, 'title="Add subfolder"'), 5, 'every folder row offers Add subfolder on hover');
+    assert.strictEqual(
+        count(subHtml, 'title="Add subfolder"'),
+        3,
+        'every folder row in Groups offers Add subfolder on hover — never one in Pinned'
+    );
 
     // --- Order is part of the data (drag & drop reordering) ----------------
     const { getCanonicalData } = await import(outfileUrl.href);
@@ -182,6 +186,31 @@ try {
     assert.strictEqual(ids(moveGroupBesideGroup(groupList, 'g1', 'g2', true)), 'g2,g1,g3', 'group dropped next to a group lands beside it');
     assert.strictEqual(moveGroupBesideGroup(groupList, 'g3', 'g2', false)[1].folderId, 'f1', 'a group dropped on a group joins that folder');
     assert.strictEqual(ids(groupList), 'g1,g2,g3', 'the group list itself is never mutated');
+
+    // --- Pinned order is its own list --------------------------------------
+    const { sortByPinnedOrder } = await import(outfileUrl.href);
+    const pinnedList = [{ id: 'f1' }, { id: 'f2' }, { id: 'f3' }];
+    assert.strictEqual(
+        ids(sortByPinnedOrder(pinnedList, ['f3', 'f1', 'f2'])),
+        'f3,f1,f2',
+        'the Pinned list follows its own stored order'
+    );
+    assert.strictEqual(
+        ids(sortByPinnedOrder(pinnedList, ['f2'])),
+        'f2,f1,f3',
+        'an item pinned after that order was written keeps its data order at the end'
+    );
+    assert.strictEqual(ids(pinnedList), 'f1,f2,f3', 'the pinned list itself is never mutated');
+    assert.strictEqual(
+        ids(sortByPinnedOrder(pinnedList, ['g9'])),
+        'f1,f2,f3',
+        'ids that are no longer pinned are ignored'
+    );
+    assert.strictEqual(
+        ids(sortByPinnedOrder(pinnedList, null)),
+        'f1,f2,f3',
+        'a missing or corrupt order falls back to the data order'
+    );
 
     // --- Subfolder helpers --------------------------------------------------
     const { collectSubtreeIds, isDescendantFolder, moveFolderRelative } = await import(outfileUrl.href);
@@ -246,10 +275,26 @@ try {
     // --- Drag & drop wiring ------------------------------------------------
     assert.strictEqual(
         count(pinnedHtml, 'draggable="true"'),
-        7,
-        'every folder/group row is draggable: 3 in Pinned (folder, its group, the pinned group) + 4 in Groups'
+        6,
+        'Groups rows are all draggable (4) and Pinned only its own roots (folder + group)'
     );
-    assert.strictEqual(count(pinnedHtml, 'draggable="false"'), 0, 'no row is excluded from dragging');
+    assert.strictEqual(count(pinnedHtml, 'draggable="false"'), 0, 'rows outside those sets drop the attribute entirely');
+
+    // --- Pinned section is favourites only ---------------------------------
+    assert.strictEqual(count(pinnedHtml, 'title="Delete folder"'), 2, 'Pinned rows never offer Delete folder (both hits are in Groups)');
+    assert.strictEqual(count(pinnedHtml, 'title="Rename folder"'), 2, 'Pinned rows never offer Rename folder');
+    assert.strictEqual(count(pinnedHtml, 'title="Delete group"'), 2, 'Pinned rows never offer Delete group');
+    assert.strictEqual(count(pinnedHtml, 'title="Rename group"'), 2, 'Pinned rows never offer Rename group');
+    assert.strictEqual(
+        count(pinnedHtml, 'title="Unpin folder"'),
+        2,
+        'the pinned folder still offers Unpin in Pinned and in Groups'
+    );
+    assert.strictEqual(
+        count(pinnedHtml, 'Add Group'),
+        2,
+        'the Add Group button only exists under folders in Groups, not in Pinned'
+    );
 
     // --- Right-click menus (folder + group) --------------------------------
     // Event handlers never reach SSR, so check the shipped bundle for the menu
@@ -261,11 +306,43 @@ try {
     ]) {
         assert.ok(bundleSource.includes(label), `right-click menu offers "${label}"`);
     }
+    // --- Drop indicators ---------------------------------------------------
+    assert.ok(
+        bundleSource.includes('left-1.5 right-1.5 h-0.5'),
+        'the drop indicator is a flat horizontal line painted as its own element'
+    );
+    assert.ok(
+        !bundleSource.includes('shadow-[inset_0_-2px_0_0_#78dce8]')
+            && !bundleSource.includes('shadow-[inset_0_2px_0_0_#78dce8]'),
+        'the old inset line (whose ends curved with the row) is gone'
+    );
+    assert.ok(
+        bundleSource.includes('shadow-[inset_0_0_0_2px_#78dce8,0_0_8px_rgba(120,220,232,0.55)]'),
+        'dropping a group into a folder lights the whole folder row up'
+    );
+    assert.ok(
+        bundleSource.includes('zone: "pinned"')
+            && bundleSource.includes('startSidebarDrag("folder", folder.id, "pinned")'),
+        'rows dragged in Pinned are tagged as a pinned-list reorder'
+    );
+    assert.ok(
+        bundleSource.includes('useLocalStorage("batch-emailer-pinned-order"'),
+        'the Pinned order is stored on its own, apart from the synced data'
+    );
+    assert.ok(
+        bundleSource.includes('drag.zone !== "groups"'),
+        'a pinned drag is refused by every drop target in the Groups tree'
+    );
+    assert.ok(
+        bundleSource.includes('setPinnedOrder(moveItemInList('),
+        'dropping in Pinned rewrites the pinned order, never the data'
+    );
     console.log('✓ Sidebar structure checks passed:');
     console.log('  - Pinned + Groups sections render; the New Folder button became a + beside Groups');
     console.log('  - pinned folders and groups each appear in Pinned and in their place in the tree');
     console.log('  - divider arrow replaces the hamburger and the empty states read correctly');
     console.log('  - subfolders nest, drag & drop ordering is hash-visible and the menus offer rename/add/delete');
+    console.log('  - drops are a flat line, folders light up when a group lands in them, Pinned only ever unpins');
 } finally {
     rmSync(fileURLToPath(outfileUrl), { force: true });
 }

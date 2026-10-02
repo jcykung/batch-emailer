@@ -127,6 +127,18 @@ function moveGroupBesideGroup(classes, movingId, targetId, placeAfter) {
     return rest;
 }
 
+// The Pinned section keeps its own display order: it is only a list of
+// favourites, so rearranging it must never touch the real folder/group order
+// the Groups tree (and the sync hash) uses. Ids that are unknown to `order`
+// (items pinned after it was written) keep their data order at the end.
+function sortByPinnedOrder(list, order) {
+    const rank = new Map((Array.isArray(order) ? order : []).map((id, i) => [id, i]));
+    return list
+        .map((item, i) => ({ item, i, rank: rank.has(item.id) ? rank.get(item.id) : Number.MAX_SAFE_INTEGER }))
+        .sort((a, b) => (a.rank - b.rank) || (a.i - b.i))
+        .map(entry => entry.item);
+}
+
 // --- Subfolders (folders may nest) ------------------------------------------
 
 // Every folder id under `rootId`, root included — walked instead of recursed
@@ -393,6 +405,7 @@ export {
     buildExistingContactIndex, planContactImport,
     moveItemInList, moveGroupToFolder, moveGroupBesideGroup,
     collectSubtreeIds, isDescendantFolder, moveFolderRelative,
+    sortByPinnedOrder,
     generateDataFingerprint, compareFingerprints
 };
 
@@ -1008,8 +1021,14 @@ export default function App() {
     const [pinnedOpen, setPinnedOpen] = useState(true);
     const [groupsOpen, setGroupsOpen] = useState(true);
 
-    // Drag & drop reordering: what is being dragged ({ kind: 'folder'|'class', id })
-    // and where it would land ({ kind, id, position: 'before'|'after' }).
+    // The Pinned section's own ordering, kept apart from the data on purpose:
+    // favourites are shortcuts to the real folders/groups, so moving them
+    // around here must not reorder the Groups tree below.
+    const [pinnedOrder, setPinnedOrder] = useLocalStorage('batch-emailer-pinned-order', [], setStorageError);
+
+    // Drag & drop reordering: what is being dragged
+    // ({ kind: 'folder'|'class', id, zone: 'groups'|'pinned' }) and where it
+    // would land ({ kind, id, position: 'before'|'after', zone }).
     const [dragItem, setDragItem] = useState(null);
     const [dropTarget, setDropTarget] = useState(null);
 
@@ -1265,7 +1284,7 @@ export default function App() {
     // longer exists (hand-edited file) is treated as top level so it can never
     // disappear from the sidebar.
     const rootFolders = activeFolders.filter(f => !f.parentId || !data.folders.some(p => p.id === f.parentId));
-    const pinnedFolders = activeFolders.filter(f => f.isPinned);
+    const pinnedFolders = sortByPinnedOrder(activeFolders.filter(f => f.isPinned), pinnedOrder);
     // Parent picker for the folder dialog: never offer the folder being edited
     // or anything inside it (that would file it under its own subtree).
     const folderParentOptions = (() => {
@@ -1291,7 +1310,7 @@ export default function App() {
     const activeClasses = data.classes.filter(c =>
         showArchived ? true : !c.isArchived
     );
-    const pinnedClasses = activeClasses.filter(c => c.isPinned);
+    const pinnedClasses = sortByPinnedOrder(activeClasses.filter(c => c.isPinned), pinnedOrder);
     const currentClass = data.classes.find(c => c.id === activeClassId);
     const classStudents = data.students.filter(s => s.classId === activeClassId);
 
@@ -1407,14 +1426,23 @@ export default function App() {
     };
 
     // Right-click on a sidebar folder or group: pin/unpin, edit, archive, delete
-    const openSidebarContextMenu = (e, type, itemId) => {
+    const openSidebarContextMenu = (e, type, itemId, zone = 'groups') => {
         e.preventDefault();
         e.stopPropagation();
+
+        // The Pinned section is just favourites: its rows may only be unpinned,
+        // so a row there opens a menu with that single entry — and a row that
+        // is not pinned itself (contents of a pinned folder) opens no menu.
+        const item = type === 'folder'
+            ? data.folders.find(f => f.id === itemId)
+            : data.classes.find(c => c.id === itemId);
+        if (zone === 'pinned' && (!item || !item.isPinned)) return;
 
         const MENU_WIDTH = 200;
         const MENU_HEIGHT = 245;
         setContextMenu({
             type,
+            zone,
             [type === 'folder' ? 'folderId' : 'classId']: itemId,
             x: Math.max(8, Math.min(e.clientX, window.innerWidth - MENU_WIDTH - 8)),
             y: Math.max(8, Math.min(e.clientY, window.innerHeight - MENU_HEIGHT - 8))
@@ -1659,6 +1687,8 @@ export default function App() {
             ...prev,
             folders: prev.folders.map(f => f.id === id ? { ...f, isPinned: !f.isPinned } : f)
         }));
+        // Forget its Pinned-only position so a later re-pin starts at the end.
+        setPinnedOrder(prev => (prev.includes(id) ? prev.filter(x => x !== id) : prev));
         setPinnedOpen(true);
     };
 
@@ -1668,20 +1698,23 @@ export default function App() {
             ...prev,
             classes: prev.classes.map(c => c.id === id ? { ...c, isPinned: !c.isPinned } : c)
         }));
+        setPinnedOrder(prev => (prev.includes(id) ? prev.filter(x => x !== id) : prev));
         setPinnedOpen(true);
     };
 
     // --- Sidebar drag & drop ------------------------------------------------
-    // Folders reorder among themselves; groups reorder and can change folder by
-    // landing on a folder row (before/after decides top or bottom of it). The
-    // Pinned section mirrors the same rows, so dragging works identically there
-    // and the Groups list updates live behind it.
-    const startSidebarDrag = (kind, id) => (e) => {
+    // Two zones, told apart by `zone` on the drag:
+    //  • 'groups' — the real tree: folders reorder among themselves, groups
+    //    reorder and can change folder by landing on a folder row.
+    //  • 'pinned' — favourites only: the row shuffles inside the Pinned list
+    //    and nothing else happens. It can never land inside a folder, and the
+    //    Groups tree underneath is left alone.
+    const startSidebarDrag = (kind, id, zone = 'groups') => (e) => {
         e.dataTransfer.effectAllowed = 'move';
         // Firefox refuses to start a drag without something in the payload.
         e.dataTransfer.setData('text/plain', `${kind}:${id}`);
         setDropTarget(null);
-        setDragItem({ kind, id });
+        setDragItem({ kind, id, zone });
     };
 
     const endSidebarDrag = () => {
@@ -1695,7 +1728,8 @@ export default function App() {
     };
 
     const overFolderRow = (e, folder) => {
-        if (!dragItem) return;
+        // A drag started in the Pinned section only ever lands back there.
+        if (!dragItem || dragItem.zone !== 'groups') return;
         // Never accept a folder inside its own subtree — the indicator must not
         // promise a drop that the drop handler would refuse.
         if (dragItem.kind === 'folder' && isDescendantFolder(data.folders, dragItem.id, folder.id)) {
@@ -1705,9 +1739,9 @@ export default function App() {
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
         const position = dropPositionFor(e);
-        setDropTarget(prev => (prev && prev.kind === 'folder' && prev.id === folder.id && prev.position === position)
+        setDropTarget(prev => (prev && prev.zone === 'groups' && prev.kind === 'folder' && prev.id === folder.id && prev.position === position)
             ? prev
-            : { kind: 'folder', id: folder.id, position });
+            : { kind: 'folder', id: folder.id, position, zone: 'groups' });
         // Landing a group inside a folder needs the folder open to be legible.
         if (dragItem.kind === 'class') {
             setExpandedFolders(prev => (prev[folder.id] ? prev : { ...prev, [folder.id]: true }));
@@ -1715,20 +1749,33 @@ export default function App() {
     };
 
     const overGroupRow = (e, cls) => {
-        // Folders have nothing to drop on inside a group's row.
-        if (!dragItem || dragItem.kind !== 'class') return;
+        // Folders have nothing to drop on inside a group's row, and pinned
+        // drags stay in the Pinned section.
+        if (!dragItem || dragItem.kind !== 'class' || dragItem.zone !== 'groups') return;
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
         const position = dropPositionFor(e);
         const id = cls.id;
-        setDropTarget(prev => (prev && prev.kind === 'class' && prev.id === id && prev.position === position)
+        setDropTarget(prev => (prev && prev.zone === 'groups' && prev.kind === 'class' && prev.id === id && prev.position === position)
             ? prev
-            : { kind: 'class', id, position });
+            : { kind: 'class', id, position, zone: 'groups' });
     };
 
-    const leaveDropRow = (e, kind, id) => {
+    // Pinned rows accept only another pinned row of the same kind: favourites
+    // reorder among themselves, folders never mix with groups.
+    const overPinnedRow = (e, kind, id) => {
+        if (!dragItem || dragItem.zone !== 'pinned' || dragItem.kind !== kind || dragItem.id === id) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        const position = dropPositionFor(e);
+        setDropTarget(prev => (prev && prev.zone === 'pinned' && prev.kind === kind && prev.id === id && prev.position === position)
+            ? prev
+            : { kind, id, position, zone: 'pinned' });
+    };
+
+    const leaveDropRow = (e, kind, id, zone = 'groups') => {
         if (e.relatedTarget && e.currentTarget.contains(e.relatedTarget)) return;
-        setDropTarget(prev => (prev && prev.kind === kind && prev.id === id ? null : prev));
+        setDropTarget(prev => (prev && prev.kind === kind && prev.id === id && prev.zone === zone ? null : prev));
     };
 
     const dropOnFolder = (e, targetFolder) => {
@@ -1736,7 +1783,7 @@ export default function App() {
         const drag = dragItem;
         const position = dropPositionFor(e);
         endSidebarDrag();
-        if (!drag) return;
+        if (!drag || drag.zone !== 'groups') return;
 
         if (drag.kind === 'folder') {
             if (drag.id === targetFolder.id) return;
@@ -1760,12 +1807,25 @@ export default function App() {
         const drag = dragItem;
         const position = dropPositionFor(e);
         endSidebarDrag();
-        if (!drag || drag.kind !== 'class' || drag.id === targetClass.id) return;
+        if (!drag || drag.kind !== 'class' || drag.id === targetClass.id || drag.zone !== 'groups') return;
 
         setData(prev => ({
             ...prev,
             classes: moveGroupBesideGroup(prev.classes, drag.id, targetClass.id, position === 'after')
         }));
+    };
+
+    // Dropping back in the Pinned list rewrites only that list's order. It is
+    // rebuilt from the ids the list is showing right now, so items pinned a
+    // moment ago are covered and folder/group data is never involved.
+    const dropOnPinnedRow = (e, kind, id) => {
+        e.preventDefault();
+        const drag = dragItem;
+        const position = dropPositionFor(e);
+        endSidebarDrag();
+        if (!drag || drag.zone !== 'pinned' || drag.kind !== kind || drag.id === id) return;
+        const shown = [...pinnedFolders.map(f => f.id), ...pinnedClasses.map(c => c.id)];
+        setPinnedOrder(moveItemInList(shown, drag.id, id, position === 'after'));
     };
 
     const toggleArchiveClass = (id) => {
@@ -2820,6 +2880,9 @@ export default function App() {
     const contextTargetFolder = contextMenu && contextMenu.type === 'folder'
         ? data.folders.find(f => f.id === contextMenu.folderId)
         : null;
+    // The menu opened from the Pinned section: favourites are read-only apart
+    // from unpinning, so that menu carries just the Unpin entry.
+    const contextMenuFromPinned = !!contextMenu && contextMenu.zone === 'pinned';
     // The folder a folder lives inside, for menu subtitles.
     const folderParentOf = (folder) => (folder && folder.parentId
         ? data.folders.find(f => f.id === folder.parentId) || null
@@ -2836,31 +2899,56 @@ export default function App() {
 
     // One group row — used inside a folder's group list and, with the parent
     // folder name shown, as a standalone entry in the Pinned section.
-    const renderGroupBlock = (cls, showFolder = false) => {
+    // `zone` says which section the row is rendered in: a 'pinned' row is a
+    // favourite, so it only shuffles inside the Pinned list, is never dropped
+    // into a folder and only ever offers Unpin.
+    const renderGroupBlock = (cls, opts = {}) => {
+        const { showFolder = false, zone = 'groups', pinnedRoot = false } = opts;
+        const inPinned = zone === 'pinned';
         const parentFolder = showFolder ? data.folders.find(f => f.id === cls.folderId) : null;
         const isDragged = dragItem && dragItem.kind === 'class' && dragItem.id === cls.id;
-        const isDropTarget = dropTarget && dropTarget.kind === 'class' && dropTarget.id === cls.id;
-        const dropLine = isDropTarget
-            ? (dropTarget.position === 'after'
-                ? 'shadow-[inset_0_-2px_0_0_#78dce8]'
-                : 'shadow-[inset_0_2px_0_0_#78dce8]')
-            : '';
+        const isDropTarget = dropTarget && dropTarget.kind === 'class' && dropTarget.id === cls.id && dropTarget.zone === zone;
+        // Only the roots of the Pinned list are draggable there; the rows
+        // inside an open pinned folder belong to that folder, not to the list.
+        const dragProps = inPinned
+            ? (pinnedRoot
+                ? {
+                    draggable: true,
+                    onDragStart: startSidebarDrag('class', cls.id, 'pinned'),
+                    onDragEnd: endSidebarDrag,
+                    onDragOver: (e) => overPinnedRow(e, 'class', cls.id),
+                    onDragLeave: (e) => leaveDropRow(e, 'class', cls.id, 'pinned'),
+                    onDrop: (e) => dropOnPinnedRow(e, 'class', cls.id)
+                }
+                : {})
+            : {
+                draggable: true,
+                onDragStart: startSidebarDrag('class', cls.id),
+                onDragEnd: endSidebarDrag,
+                onDragOver: (e) => overGroupRow(e, cls),
+                onDragLeave: (e) => leaveDropRow(e, 'class', cls.id),
+                onDrop: (e) => dropOnGroup(e, cls)
+            };
         return (
             <div
                 key={cls.id}
-                className={`group flex items-center justify-between p-2 rounded-md cursor-pointer select-none transition-all duration-200 text-sm ${activeClassId === cls.id
+                className={`group relative flex items-center justify-between p-2 rounded-md cursor-pointer select-none transition-all duration-200 text-sm ${activeClassId === cls.id
                     ? (isDark ? 'bg-[#ab9df2]/15 text-[#ab9df2] font-semibold' : 'bg-[#ab9df2]/20 text-[#5c4cb0] font-semibold')
                     : (isDark ? 'hover:bg-[#3a373a]/20 text-[#939293]' : 'hover:bg-[#e1d5e3]/20 text-[#726f73]')
-                    } ${isDragged ? 'opacity-40' : ''} ${dropLine}`}
+                    } ${isDragged ? 'opacity-40' : ''}`}
                 onClick={() => { setActiveClassId(cls.id); setSelectedStudents([]); }}
-                onContextMenu={(e) => openSidebarContextMenu(e, 'class', cls.id)}
-                draggable
-                onDragStart={startSidebarDrag('class', cls.id)}
-                onDragEnd={endSidebarDrag}
-                onDragOver={(e) => overGroupRow(e, cls)}
-                onDragLeave={(e) => leaveDropRow(e, 'class', cls.id)}
-                onDrop={(e) => dropOnGroup(e, cls)}
+                onContextMenu={(e) => openSidebarContextMenu(e, 'class', cls.id, zone)}
+                {...dragProps}
             >
+                {/* Landing marker: a flat horizontal line with square ends —
+                    painted by a child so the row's rounded corners can't curve
+                    it at the ends. */}
+                {isDropTarget && (
+                    <span
+                        aria-hidden="true"
+                        className={`pointer-events-none absolute left-1.5 right-1.5 h-0.5 bg-[#78dce8] ${dropTarget.position === 'after' ? 'bottom-0' : 'top-0'}`}
+                    />
+                )}
                 <div className="flex items-center gap-2 truncate">
                     <Book size={14} className={`shrink-0 ${activeClassId === cls.id ? 'text-[#ab9df2]' : 'text-gray-400'}`} />
                     <span className="truncate max-w-[120px]" title={cls.name}>{cls.name}</span>
@@ -2876,50 +2964,84 @@ export default function App() {
                     )}
                 </div>
                 <div className="hidden group-hover:flex items-center gap-1 shrink-0">
-                    <button onClick={(e) => { e.stopPropagation(); togglePinClass(cls.id); }} className="p-1 text-gray-400 hover:text-[#ffd866] transition-colors" title={cls.isPinned ? 'Unpin group' : 'Pin group'}>
-                        {cls.isPinned ? <PinOff size={13} /> : <Pin size={13} />}
-                    </button>
-                    <button onClick={(e) => { e.stopPropagation(); openEditModal('class', cls); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors" title="Rename group"><Edit2 size={13} /></button>
-                    <button onClick={(e) => { e.stopPropagation(); toggleArchiveClass(cls.id); }} className="p-1 text-gray-400 hover:text-[#fc9867] transition-colors"><Archive size={13} /></button>
-                    <button onClick={(e) => { e.stopPropagation(); deleteClass(cls.id); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors"><Trash2 size={13} /></button>
+                    {(!inPinned || cls.isPinned) && (
+                        <button onClick={(e) => { e.stopPropagation(); togglePinClass(cls.id); }} className="p-1 text-gray-400 hover:text-[#ffd866] transition-colors" title={cls.isPinned ? 'Unpin group' : 'Pin group'}>
+                            {cls.isPinned ? <PinOff size={13} /> : <Pin size={13} />}
+                        </button>
+                    )}
+                    {!inPinned && (
+                        <>
+                            <button onClick={(e) => { e.stopPropagation(); openEditModal('class', cls); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors" title="Rename group"><Edit2 size={13} /></button>
+                            <button onClick={(e) => { e.stopPropagation(); toggleArchiveClass(cls.id); }} className="p-1 text-gray-400 hover:text-[#fc9867] transition-colors" title={cls.isArchived ? 'Unarchive group' : 'Archive group'}><Archive size={13} /></button>
+                            <button onClick={(e) => { e.stopPropagation(); deleteClass(cls.id); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors" title="Delete group"><Trash2 size={13} /></button>
+                        </>
+                    )}
                 </div>
             </div>
         );
     };
 
     // One folder block (row + its collapsible subfolder and group list), shared
-    // by the Pinned section and the Groups section so both behave identically.
+    // by the Pinned section and the Groups section. `zone` says which section
+    // it is rendered in: rows in 'pinned' are favourites, so they only reorder
+    // among themselves, never become a drop target for the tree, and only ever
+    // offer Unpin (no add/rename/archive/delete there).
     // `depth` is both the recursion passed to children and a guard: a corrupt
     // file with a folder cycle in it can only ever render 8 levels.
-    const renderFolderBlock = (folder, depth = 0) => {
+    const renderFolderBlock = (folder, depth = 0, zone = 'groups') => {
+        const inPinned = zone === 'pinned';
         const isOpen = !!expandedFolders[folder.id];
         const groupCount = data.classes.filter(c => c.folderId === folder.id && (showArchived ? true : !c.isArchived)).length;
         const subFolders = depth < 8
             ? activeFolders.filter(f => f.parentId === folder.id && f.id !== folder.id)
             : [];
         const isDragged = dragItem && dragItem.kind === 'folder' && dragItem.id === folder.id;
-        const isDropTarget = dropTarget && dropTarget.kind === 'folder' && dropTarget.id === folder.id;
-        const dropLine = isDropTarget
-            ? (dropTarget.position === 'after'
-                ? 'shadow-[inset_0_-2px_0_0_#78dce8]'
-                : 'shadow-[inset_0_2px_0_0_#78dce8]')
-            : '';
+        const isDropTarget = dropTarget && dropTarget.kind === 'folder' && dropTarget.id === folder.id && dropTarget.zone === zone;
+        // A group landing on this row means "inside this folder", so the whole
+        // row lights up; a folder landing on it is an order change, which gets
+        // the flat line instead.
+        const dropInto = isDropTarget && dragItem && dragItem.kind === 'class';
+        // Only the roots of the Pinned list are draggable there — the rows
+        // inside an open pinned folder belong to that folder, not to the list.
+        const dragProps = inPinned
+            ? (depth === 0
+                ? {
+                    draggable: true,
+                    onDragStart: startSidebarDrag('folder', folder.id, 'pinned'),
+                    onDragEnd: endSidebarDrag,
+                    onDragOver: (e) => overPinnedRow(e, 'folder', folder.id),
+                    onDragLeave: (e) => leaveDropRow(e, 'folder', folder.id, 'pinned'),
+                    onDrop: (e) => dropOnPinnedRow(e, 'folder', folder.id)
+                }
+                : {})
+            : {
+                draggable: true,
+                onDragStart: startSidebarDrag('folder', folder.id),
+                onDragEnd: endSidebarDrag,
+                onDragOver: (e) => overFolderRow(e, folder),
+                onDragLeave: (e) => leaveDropRow(e, 'folder', folder.id),
+                onDrop: (e) => dropOnFolder(e, folder)
+            };
         return (
             <div key={folder.id} className="space-y-1">
                 <div
-                    className={`group flex items-center justify-between p-2 rounded-md cursor-pointer select-none transition-all duration-200 ${activeFolderId === folder.id
+                    className={`group relative flex items-center justify-between p-2 rounded-md cursor-pointer select-none transition-all duration-200 ${activeFolderId === folder.id
                         ? (isDark ? 'bg-[#3a373a] font-semibold text-white' : 'bg-[#e1d5e3]/65 font-semibold text-[#2d2a2e]')
                         : (isDark ? 'hover:bg-[#3a373a]/30' : 'hover:bg-[#e1d5e3]/30')
-                        } ${isDragged ? 'opacity-40' : ''} ${dropLine}`}
+                        } ${isDragged ? 'opacity-40' : ''} ${dropInto ? 'shadow-[inset_0_0_0_2px_#78dce8,0_0_8px_rgba(120,220,232,0.55)]' : ''}`}
                     onClick={() => toggleFolder(folder.id)}
-                    onContextMenu={(e) => openSidebarContextMenu(e, 'folder', folder.id)}
-                    draggable
-                    onDragStart={startSidebarDrag('folder', folder.id)}
-                    onDragEnd={endSidebarDrag}
-                    onDragOver={(e) => overFolderRow(e, folder)}
-                    onDragLeave={(e) => leaveDropRow(e, 'folder', folder.id)}
-                    onDrop={(e) => dropOnFolder(e, folder)}
+                    onContextMenu={(e) => openSidebarContextMenu(e, 'folder', folder.id, zone)}
+                    {...dragProps}
                 >
+                    {/* Landing marker: a flat horizontal line with square ends —
+                        painted by a child so the row's rounded corners can't
+                        curve it at the ends. */}
+                    {isDropTarget && !dropInto && (
+                        <span
+                            aria-hidden="true"
+                            className={`pointer-events-none absolute left-1.5 right-1.5 h-0.5 bg-[#78dce8] ${dropTarget.position === 'after' ? 'bottom-0' : 'top-0'}`}
+                        />
+                    )}
                     <div className="flex items-center gap-2 text-sm truncate flex-1">
                         <ChevronDown
                             size={14}
@@ -2941,15 +3063,21 @@ export default function App() {
                             {groupCount}
                         </span>
                         <div className="hidden group-hover:flex items-center gap-1 transition-all">
-                            <button onClick={(e) => { e.stopPropagation(); togglePinFolder(folder.id); }} className="p-1 text-gray-400 hover:text-[#ffd866] transition-colors" title={folder.isPinned ? 'Unpin folder' : 'Pin folder'}>
-                                {folder.isPinned ? <PinOff size={13} /> : <Pin size={13} />}
-                            </button>
-                            <button onClick={(e) => { e.stopPropagation(); setEditingItem(null); setFolderModalParentId(folder.id); setModals({ ...modals, folder: true }); }} className="p-1 text-gray-400 hover:text-[#a9dc76] transition-colors" title="Add subfolder">
-                                <FolderPlus size={13} />
-                            </button>
-                            <button onClick={(e) => { e.stopPropagation(); openEditModal('folder', folder); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors" title="Rename folder"><Edit2 size={13} /></button>
-                            <button onClick={(e) => { e.stopPropagation(); toggleArchiveFolder(folder.id); }} className="p-1 text-gray-400 hover:text-[#fc9867] transition-colors"><Archive size={13} /></button>
-                            <button onClick={(e) => { e.stopPropagation(); deleteFolder(folder.id); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors"><Trash2 size={13} /></button>
+                            {(!inPinned || folder.isPinned) && (
+                                <button onClick={(e) => { e.stopPropagation(); togglePinFolder(folder.id); }} className="p-1 text-gray-400 hover:text-[#ffd866] transition-colors" title={folder.isPinned ? 'Unpin folder' : 'Pin folder'}>
+                                    {folder.isPinned ? <PinOff size={13} /> : <Pin size={13} />}
+                                </button>
+                            )}
+                            {!inPinned && (
+                                <>
+                                    <button onClick={(e) => { e.stopPropagation(); setEditingItem(null); setFolderModalParentId(folder.id); setModals({ ...modals, folder: true }); }} className="p-1 text-gray-400 hover:text-[#a9dc76] transition-colors" title="Add subfolder">
+                                        <FolderPlus size={13} />
+                                    </button>
+                                    <button onClick={(e) => { e.stopPropagation(); openEditModal('folder', folder); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors" title="Rename folder"><Edit2 size={13} /></button>
+                                    <button onClick={(e) => { e.stopPropagation(); toggleArchiveFolder(folder.id); }} className="p-1 text-gray-400 hover:text-[#fc9867] transition-colors" title={folder.isArchived ? 'Unarchive folder' : 'Archive folder'}><Archive size={13} /></button>
+                                    <button onClick={(e) => { e.stopPropagation(); deleteFolder(folder.id); }} className="p-1 text-gray-400 hover:text-[#ff6188] transition-colors" title="Delete folder"><Trash2 size={13} /></button>
+                                </>
+                            )}
                         </div>
                     </div>
                 </div>
@@ -2960,14 +3088,16 @@ export default function App() {
                 >
                     <div className="overflow-hidden">
                         <div className="pl-6 space-y-1 pb-1">
-                            {subFolders.map(sub => renderFolderBlock(sub, depth + 1))}
-                            {activeClasses.filter(c => c.folderId === folder.id).map(cls => renderGroupBlock(cls))}
-                            <button
-                                onClick={() => { setEditingItem(null); setClassModalFolderId(folder.id); setModals({ ...modals, class: true }); }}
-                                className="flex items-center gap-2 text-xs text-gray-500 hover:text-blue-600 p-2 w-full text-left transition-colors font-semibold"
-                            >
-                                <Plus size={14} /> Add Group
-                            </button>
+                            {subFolders.map(sub => renderFolderBlock(sub, depth + 1, zone))}
+                            {activeClasses.filter(c => c.folderId === folder.id).map(cls => renderGroupBlock(cls, { zone }))}
+                            {!inPinned && (
+                                <button
+                                    onClick={() => { setEditingItem(null); setClassModalFolderId(folder.id); setModals({ ...modals, class: true }); }}
+                                    className="flex items-center gap-2 text-xs text-gray-500 hover:text-blue-600 p-2 w-full text-left transition-colors font-semibold"
+                                >
+                                    <Plus size={14} /> Add Group
+                                </button>
+                            )}
                         </div>
                     </div>
                 </div>
@@ -3066,8 +3196,8 @@ export default function App() {
                                         </div>
                                     ) : (
                                         <>
-                                            {pinnedFolders.map(f => renderFolderBlock(f, 0))}
-                                            {pinnedClasses.map(cls => renderGroupBlock(cls, true))}
+                                            {pinnedFolders.map(f => renderFolderBlock(f, 0, 'pinned'))}
+                                            {pinnedClasses.map(cls => renderGroupBlock(cls, { showFolder: true, zone: 'pinned', pinnedRoot: true }))}
                                         </>
                                     )}
                                 </div>
@@ -3850,7 +3980,8 @@ export default function App() {
                                     <li>The sidebar is organised into two collapsible sections: <strong>Pinned</strong> on top (with a "Nothing pinned yet" hint) and <strong>Groups</strong> below it, which holds the full folder tree. The standalone New Folder button became a <strong>+</strong> on the Groups header.</li>
                                     <li>Pin a folder <em>or</em> a group — hover for the pin icon, or right-click → Pin — and it is listed in Pinned while staying in its place in the tree.</li>
                                     <li>The header hamburger was replaced by an <strong>arrow handle on the divider</strong> that slides with the sidebar, on desktop and mobile.</li>
-                                    <li><strong>Drag &amp; drop:</strong> drag folders to rearrange them, drag groups to reorder them or move them into another folder (dropping on a folder row opens it as you hover), and drop a folder beside a subfolder to file it at that level. The dragged row dims, the landing row shows a cyan line, and a folder can never be dropped inside its own subtree.</li>
+                                    <li><strong>Drag &amp; drop:</strong> drag folders to rearrange them, drag groups to reorder them or move them into another folder (dropping on a folder row opens it as you hover), and drop a folder beside a subfolder to file it at that level. The dragged row dims and the landing spot shows a <strong>flat</strong> cyan line — no curved ends — while a folder a group is about to land <em>inside</em> lights up instead of showing a line. A folder can never be dropped inside its own subtree.</li>
+                                    <li><strong>Pinned is favourites only:</strong> its rows shuffle among themselves in their own order (reordering them never moves anything in the Groups tree), and the only action they offer is Unpin — no dragging into folders, no add-subfolder, rename, archive or delete, on hover or right-click.</li>
                                     <li><strong>Right-click menus</strong> for folders and groups: Pin, <strong>Add Subfolder</strong> (folders), Rename, Archive and Delete — the same actions are also on each row's hover buttons.</li>
                                     <li><strong>Subfolders</strong> at any depth: the folder dialog gained an "Inside" picker that refuses to file a folder under itself, deleting a folder takes its subfolders, groups and contacts with it, and "Add Group" now creates the group in the folder you actually clicked.</li>
                                     <li>Folder <strong>order and nesting are real data</strong>: they travel inside backups and sync files, count towards the content hash (so a reorder really pushes to your other devices), and are named in the conflict dialog as "folder order / group order / subfolder nesting differs".</li>
@@ -4205,50 +4336,54 @@ export default function App() {
                         {contextTargetFolder.isPinned ? <PinOff size={14} className="shrink-0" /> : <Pin size={14} className="shrink-0" />}
                         {contextTargetFolder.isPinned ? 'Unpin Folder' : 'Pin Folder'}
                     </button>
-                    <button
-                        type="button"
-                        onClick={() => {
-                            setContextMenu(null);
-                            setEditingItem(null);
-                            setFolderModalParentId(contextTargetFolder.id);
-                            setModals(prev => ({ ...prev, folder: true }));
-                        }}
-                        className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm font-semibold text-left transition-colors ${isDark ? 'hover:bg-[#4a474a] text-[#fcfaf2]' : 'hover:bg-[#f2ece0] text-[#2d2a2e]'}`}
-                    >
-                        <FolderPlus size={14} className="shrink-0" /> Add Subfolder
-                    </button>
-                    <button
-                        type="button"
-                        onClick={() => {
-                            setContextMenu(null);
-                            openEditModal('folder', contextTargetFolder);
-                        }}
-                        className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm font-semibold text-left transition-colors ${isDark ? 'hover:bg-[#4a474a] text-[#fcfaf2]' : 'hover:bg-[#f2ece0] text-[#2d2a2e]'}`}
-                    >
-                        <Edit2 size={14} className="shrink-0" /> Rename Folder
-                    </button>
-                    <button
-                        type="button"
-                        onClick={() => {
-                            setContextMenu(null);
-                            toggleArchiveFolder(contextTargetFolder.id);
-                        }}
-                        className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm font-semibold text-left transition-colors ${isDark ? 'hover:bg-[#4a474a] text-[#fcfaf2]' : 'hover:bg-[#f2ece0] text-[#2d2a2e]'}`}
-                    >
-                        <Archive size={14} className="shrink-0" /> {contextTargetFolder.isArchived ? 'Unarchive Folder' : 'Archive Folder'}
-                    </button>
-                    <div className={`my-1 border-t ${themeClasses.border}`} />
-                    <button
-                        type="button"
-                        onClick={() => {
-                            const folderId = contextTargetFolder.id;
-                            setContextMenu(null);
-                            deleteFolder(folderId);
-                        }}
-                        className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm font-bold text-left transition-colors ${isDark ? 'hover:bg-[#ff6188]/20 text-[#ff6188]' : 'hover:bg-[#e0466a]/10 text-[#e0466a]'}`}
-                    >
-                        <Trash2 size={14} className="shrink-0" /> Delete Folder
-                    </button>
+                    {!contextMenuFromPinned && (
+                        <>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setContextMenu(null);
+                                    setEditingItem(null);
+                                    setFolderModalParentId(contextTargetFolder.id);
+                                    setModals(prev => ({ ...prev, folder: true }));
+                                }}
+                                className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm font-semibold text-left transition-colors ${isDark ? 'hover:bg-[#4a474a] text-[#fcfaf2]' : 'hover:bg-[#f2ece0] text-[#2d2a2e]'}`}
+                            >
+                                <FolderPlus size={14} className="shrink-0" /> Add Subfolder
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setContextMenu(null);
+                                    openEditModal('folder', contextTargetFolder);
+                                }}
+                                className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm font-semibold text-left transition-colors ${isDark ? 'hover:bg-[#4a474a] text-[#fcfaf2]' : 'hover:bg-[#f2ece0] text-[#2d2a2e]'}`}
+                            >
+                                <Edit2 size={14} className="shrink-0" /> Rename Folder
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setContextMenu(null);
+                                    toggleArchiveFolder(contextTargetFolder.id);
+                                }}
+                                className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm font-semibold text-left transition-colors ${isDark ? 'hover:bg-[#4a474a] text-[#fcfaf2]' : 'hover:bg-[#f2ece0] text-[#2d2a2e]'}`}
+                            >
+                                <Archive size={14} className="shrink-0" /> {contextTargetFolder.isArchived ? 'Unarchive Folder' : 'Archive Folder'}
+                            </button>
+                            <div className={`my-1 border-t ${themeClasses.border}`} />
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    const folderId = contextTargetFolder.id;
+                                    setContextMenu(null);
+                                    deleteFolder(folderId);
+                                }}
+                                className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm font-bold text-left transition-colors ${isDark ? 'hover:bg-[#ff6188]/20 text-[#ff6188]' : 'hover:bg-[#e0466a]/10 text-[#e0466a]'}`}
+                            >
+                                <Trash2 size={14} className="shrink-0" /> Delete Folder
+                            </button>
+                        </>
+                    )}
                 </div>
             )}
 
@@ -4278,38 +4413,42 @@ export default function App() {
                         {contextTargetClass.isPinned ? <PinOff size={14} className="shrink-0" /> : <Pin size={14} className="shrink-0" />}
                         {contextTargetClass.isPinned ? 'Unpin Group' : 'Pin Group'}
                     </button>
-                    <button
-                        type="button"
-                        onClick={() => {
-                            setContextMenu(null);
-                            openEditModal('class', contextTargetClass);
-                        }}
-                        className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm font-semibold text-left transition-colors ${isDark ? 'hover:bg-[#4a474a] text-[#fcfaf2]' : 'hover:bg-[#f2ece0] text-[#2d2a2e]'}`}
-                    >
-                        <Edit2 size={14} className="shrink-0" /> Rename Group
-                    </button>
-                    <button
-                        type="button"
-                        onClick={() => {
-                            setContextMenu(null);
-                            toggleArchiveClass(contextTargetClass.id);
-                        }}
-                        className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm font-semibold text-left transition-colors ${isDark ? 'hover:bg-[#4a474a] text-[#fcfaf2]' : 'hover:bg-[#f2ece0] text-[#2d2a2e]'}`}
-                    >
-                        <Archive size={14} className="shrink-0" /> {contextTargetClass.isArchived ? 'Unarchive Group' : 'Archive Group'}
-                    </button>
-                    <div className={`my-1 border-t ${themeClasses.border}`} />
-                    <button
-                        type="button"
-                        onClick={() => {
-                            const classId = contextTargetClass.id;
-                            setContextMenu(null);
-                            deleteClass(classId);
-                        }}
-                        className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm font-bold text-left transition-colors ${isDark ? 'hover:bg-[#ff6188]/20 text-[#ff6188]' : 'hover:bg-[#e0466a]/10 text-[#e0466a]'}`}
-                    >
-                        <Trash2 size={14} className="shrink-0" /> Delete Group
-                    </button>
+                    {!contextMenuFromPinned && (
+                        <>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setContextMenu(null);
+                                    openEditModal('class', contextTargetClass);
+                                }}
+                                className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm font-semibold text-left transition-colors ${isDark ? 'hover:bg-[#4a474a] text-[#fcfaf2]' : 'hover:bg-[#f2ece0] text-[#2d2a2e]'}`}
+                            >
+                                <Edit2 size={14} className="shrink-0" /> Rename Group
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setContextMenu(null);
+                                    toggleArchiveClass(contextTargetClass.id);
+                                }}
+                                className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm font-semibold text-left transition-colors ${isDark ? 'hover:bg-[#4a474a] text-[#fcfaf2]' : 'hover:bg-[#f2ece0] text-[#2d2a2e]'}`}
+                            >
+                                <Archive size={14} className="shrink-0" /> {contextTargetClass.isArchived ? 'Unarchive Group' : 'Archive Group'}
+                            </button>
+                            <div className={`my-1 border-t ${themeClasses.border}`} />
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    const classId = contextTargetClass.id;
+                                    setContextMenu(null);
+                                    deleteClass(classId);
+                                }}
+                                className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm font-bold text-left transition-colors ${isDark ? 'hover:bg-[#ff6188]/20 text-[#ff6188]' : 'hover:bg-[#e0466a]/10 text-[#e0466a]'}`}
+                            >
+                                <Trash2 size={14} className="shrink-0" /> Delete Group
+                            </button>
+                        </>
+                    )}
                 </div>
             )}
 
