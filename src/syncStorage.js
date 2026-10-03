@@ -19,6 +19,46 @@ export const SYNC_DB_STORE = 'sync_handles';
 export const SYNC_HANDLE_KEY = 'activeSyncHandle';
 export const AUTO_BACKUP_STORE = 'auto_backups';
 
+// How many automatic backups are kept, and how much slack is allowed before a
+// prune pass runs (see putAutoBackup).
+export const AUTO_BACKUP_MAX_RECORDS = 12;
+const AUTO_BACKUP_PRUNE_SLACK = 4;
+const AUTO_BACKUP_META_ID = '__auto_backup_meta';
+
+// Spacing between kept snapshots doubles from one minute: 1, 3, 7, 15, 31 …
+// minutes. The newest state and the one right before it are always kept as they
+// are, and every further slot reaches roughly twice as far back as the one
+// before it — so 12 slots cover a few days without ever leaving a hole between
+// them, which is what a fixed-size list of "the last 12 saves" cannot do.
+const AUTO_BACKUP_BASE_GAP_MS = 60 * 1000;
+
+function timestampOf(record) {
+    const t = Date.parse(record && record.timestamp);
+    return Number.isFinite(t) ? t : 0;
+}
+
+// Newest first, always keeping the newest entry, then one entry per widening
+// gap until the cap is reached. Pruning can therefore never empty the store or
+// drop the current state, and can never discard an old snapshot while closer
+// ones are still crowded together.
+// Exported for scripts/verify_backup_integrity.mjs.
+export function selectAutoBackupsToKeep(records, maxRecords) {
+    const sorted = records.slice().sort((a, b) => timestampOf(b) - timestampOf(a));
+    const keep = [];
+    let gapMs = AUTO_BACKUP_BASE_GAP_MS;
+    let lastKeptTs = Number.POSITIVE_INFINITY;
+
+    for (const record of sorted) {
+        if (keep.length >= maxRecords) break;
+        const ts = timestampOf(record);
+        if (lastKeptTs - ts < gapMs) continue;
+        keep.push(record);
+        lastKeptTs = ts;
+        gapMs = gapMs * 2 + AUTO_BACKUP_BASE_GAP_MS;
+    }
+    return keep;
+}
+
 const LEGACY_SYNC_DB_STORE = 'handles';
 const LEGACY_SYNC_HANDLE_KEY = 'syncFileHandle';
 const REQUIRED_STORES = [SYNC_DB_STORE, AUTO_BACKUP_STORE];
@@ -222,12 +262,80 @@ export async function clearSyncHandle() {
     }));
 }
 
-export async function putAutoBackup(record) {
+export async function putAutoBackup(record, { maxRecords = AUTO_BACKUP_MAX_RECORDS } = {}) {
     return withSyncDB(db => new Promise((resolve, reject) => {
         const tx = db.transaction(AUTO_BACKUP_STORE, 'readwrite');
-        tx.objectStore(AUTO_BACKUP_STORE).put(record);
-        tx.oncomplete = () => resolve();
+        const store = tx.objectStore(AUTO_BACKUP_STORE);
+        const outcome = { skipped: false, pruned: 0 };
+
+        // Tiny metadata record: lets the hot path (one write per user action)
+        // decide "is this content already the newest snapshot?" with a single
+        // small get instead of reading every stored dataset back.
+        const metaReq = store.get(AUTO_BACKUP_META_ID);
+        metaReq.onsuccess = () => {
+            const meta = metaReq.result || null;
+            if (meta && record && record.contentHash && meta.lastContentHash === record.contentHash) {
+                // Identical to the snapshot we already hold. A rolling history
+                // is about distinct points in time, not one entry per edit.
+                outcome.skipped = true;
+                return;
+            }
+
+            store.put(record);
+            store.put({
+                id: AUTO_BACKUP_META_ID,
+                lastContentHash: (record && record.contentHash) || null,
+                updatedAt: (record && record.timestamp) || null
+            });
+
+            // Only read the stored datasets back when we have drifted past the
+            // cap, and only when there is actually something to prune.
+            const countReq = store.count();
+            countReq.onsuccess = () => {
+                if ((countReq.result || 0) <= maxRecords + AUTO_BACKUP_PRUNE_SLACK + 1) return;
+                const allReq = store.getAll();
+                allReq.onsuccess = () => {
+                    const all = (allReq.result || []).filter(r => r && r.id !== AUTO_BACKUP_META_ID);
+                    const keepIds = new Set(selectAutoBackupsToKeep(all, maxRecords).map(r => r.id));
+                    all.filter(r => !keepIds.has(r.id)).forEach(r => {
+                        store.delete(r.id);
+                        outcome.pruned += 1;
+                    });
+                };
+            };
+        };
+
+        metaReq.onerror = () => reject(metaReq.error || tx.error);
+        tx.oncomplete = () => resolve(outcome);
         tx.onerror = () => reject(tx.error || new Error('Could not write the automatic backup'));
         tx.onabort = () => reject(tx.error || new Error('Could not write the automatic backup'));
+    }));
+}
+
+/**
+ * Newest-first list of automatic backups, skipping the internal metadata record.
+ * Records without a stored summary (written by older builds) are returned as-is;
+ * the caller decides whether to read them back to build one.
+ */
+export async function listAutoBackups() {
+    return withSyncDB(db => new Promise((resolve, reject) => {
+        const tx = db.transaction(AUTO_BACKUP_STORE, 'readonly');
+        const req = tx.objectStore(AUTO_BACKUP_STORE).getAll();
+        req.onsuccess = () => {
+            const all = (req.result || []).filter(r => r && r.id !== AUTO_BACKUP_META_ID && r.envelope);
+            resolve(all.sort((a, b) => timestampOf(b) - timestampOf(a)));
+        };
+        req.onerror = () => reject(req.error || tx.error);
+    }));
+}
+
+/** Read one automatic backup (by the id returned from listAutoBackups). */
+export async function getAutoBackup(id) {
+    if (!id || id === AUTO_BACKUP_META_ID) return null;
+    return withSyncDB(db => new Promise((resolve, reject) => {
+        const tx = db.transaction(AUTO_BACKUP_STORE, 'readonly');
+        const req = tx.objectStore(AUTO_BACKUP_STORE).get(id);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => reject(req.error || tx.error);
     }));
 }

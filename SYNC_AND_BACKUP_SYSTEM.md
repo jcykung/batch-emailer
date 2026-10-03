@@ -402,9 +402,23 @@ When synchronization runs, it compares:
 | `localHash === fileHash` | No | No | **Already in sync**: Update timestamp, exit. |
 | Initial setup (one side empty) | Local has data | File is empty | **Push local to file** (Revision 1). |
 | Initial setup (one side empty) | Local is empty | File has data | **Pull file to local**. |
-| `localHash === baseHash && fileHash !== baseHash` | No | Yes | **Pull from file**: Apply data silently. |
+| `localHash === baseHash && fileHash !== baseHash` | No | Yes | **Pull from file**: Apply data silently — *unless* the file has lost messages this device still holds, in which case fall through to conflict (see below). |
 | `localHash !== baseHash && fileHash === baseHash` | Yes | No | **Push to file**: Increment revision and write. |
-| `localHash !== baseHash && fileHash !== baseHash` | Yes | Yes | **True Conflict**: Open visual Conflict Modal. |
+| `localHash !== baseHash && fileHash !== baseHash` | Yes | Yes | **True Conflict**: Open visual Conflict Modal — **Merge Both**, *Keep File*, or *Keep Local*. |
+
+> [!IMPORTANT]
+> **The pull guard: never pull a file that holds less history than you do.**
+> "No local changes, the file moved on" is only safe while the file is a **superset** of what this device last synced. It stops being true the moment another device writes *less* to the file — a *Keep My Local Data* choice there, a partial write, a restored-elsewhere copy. A silent pull would then drop the messages this device still has, with no undo.
+>
+> So before pulling, the app counts messages that exist locally but are absent from the file, **for contacts present on both sides** (`countMessagesMissingFromFile`). Anything above zero falls through to the conflict dialog, which reports each side's message count and offers **Merge Both**. A contact the file does not have at all is deliberately *not* counted: that is a normal deletion, handled by ordinary sync, not lost history.
+
+The conflict modal offers three resolutions, and the first one is the only one that cannot lose data:
+
+1. **Merge Both — Keep Everything** → `mergeSyncData(local, file)`: folders and groups are unioned (local arrangement kept, file-only ones appended), contacts present on both sides go through `mergeContactRecords` so their histories are unioned too, and the result is pushed as a new revision. Nothing is discarded.
+2. **Keep File Version** → replaces local state with the file. Local-only work is gone.
+3. **Keep My Local Data** → overwrites the file. The other computer's file-only work is gone.
+
+Options 2 and 3 say so in the confirmation, because they are destructive and the user has to be able to tell which one they just clicked.
 
 ```javascript
 async function executeSyncResolution({ parsed, file, handle = null, isFirstSetup = false, onPushRequired = null }) {
@@ -576,9 +590,9 @@ The most user-visible piece of this architecture: **open the app on a second com
 
 This is the decision worth copying. The bar knows exactly one thing: *"the file is ahead of us, and here is who wrote it."* Pressing **Sync Now** runs the normal decision engine ([§6](#6-the-sync-decision-engine)):
 
-* no local edits → silent **pull**,
+* no local edits → silent **pull** (skipped if the file has lost messages this device still has — see [§6.1](#61-decision-matrix)),
 * only local edits → silent **push**,
-* both sides changed → the **conflict modal** with a per-record diff.
+* both sides changed → the **conflict modal** with a per-record diff, each side's message count, and a **Merge Both** option that keeps everything.
 
 Never let a notification overwrite data. If a bar were allowed to "just take the file", one stray window-focus event while you are typing could wipe out unsaved work.
 
@@ -675,6 +689,9 @@ Set the status to `external-update` at the same moment, so the Sync & Backup scr
 The fingerprinting engine summarizes dataset state and pinpoints exact additions, removals, and modifications between datasets.
 
 ### 9.1 Generating a Fingerprint
+
+> [!NOTE]
+> **Count the messages, not just the records.** The fingerprint in this app also carries `messageCount: countEmailMessages(...)` per side, and `compareFingerprints()` emits an `Email messages: N local vs M in file` difference from it. A conflict dialog that only shows entity counts makes "which side do I keep?" a blind choice about the one thing users care about most. Message counts are cheap and make the trade-off visible before the click.
 
 ```javascript
 function generateDataFingerprint(data = null) {
@@ -816,8 +833,8 @@ async function restoreFromBackup(event) {
 ### 10.3 Restore Options: Replace All vs Import New
 
 The restore modal presents two distinct choices:
-1. **Replace All Data**: Wipes local data and completely loads the file. If the file has `syncMeta`, it updates `lastSyncedContentHash` and `baseRevision` so subsequent syncs do not detect false conflicts.
-2. **Import New Items**: Reads the incoming IDs and merges only entities that do not already exist in the local dataset.
+1. **Replace All Data**: Wipes local data and completely loads the backup. It deliberately does **not** touch the sync base — the restored content has *not* been written to the sync file, so recording it as "already synced" would make the next sync read local as unchanged and silently pull the file over it, wiping the history just restored. Instead it stamps `lastLocalChange`, leaving the data flagged as *unsynced edits* so the next sync pushes it (or opens the conflict dialog, which can merge). It also never renames the sync file after the backup it came from. Marking a restore as synced is the classic way a backup restore self-destructs on the next sync.
+2. **Import New Items**: Reads the incoming IDs and merges only entities that do not already exist in the local dataset, and unions email histories for the ones that do (`mergeContactRecords`). It finishes with `noteLocalChange()` so the merged result is tracked as work to push rather than falling out of the change tracker.
 
 ---
 
@@ -923,23 +940,55 @@ The three spellings plus a text match are needed because engines disagree on how
 
 ### 12.6 An automatic browser backup on every change
 
-Every change is also written to IndexedDB, so a user who never connects a file still has a last-known-good copy inside the browser and "Restore from Backup" keeps working for them. It closes the "I never set sync up" data-loss hole for the cost of one structured-clone write per change.
+### 12.6 An automatic backup history in the browser
+
+Every change is also written to IndexedDB (`putAutoBackup`), so a user who never connects a file — or who loses history to a bad sync — still has points to come back to. Three decisions make it a safety net instead of a single record each save overwrites:
+
+* **A rolling history, not one record.** Up to `AUTO_BACKUP_MAX_RECORDS` (12) snapshots are kept, and a save whose content hash matches the newest one is skipped, so the history holds distinct points in time rather than one entry per keystroke.
+* **Slots that spread over time.** Pruning keeps the newest snapshot, then one snapshot per *widening* gap — 1, 3, 7, 15, 31 … minutes. Twelve slots therefore reach a few days back with no hole between them, where "the last 12 saves" would cover about a minute. The newest snapshot always survives, so pruning can never empty the store.
+* **A restore that merges.** *Sync & Backup → Automatic Backups* decrypts a snapshot and feeds it through the same restore-choice modal as a file backup, so the default path unions histories instead of replacing them.
+
+The hot path stays cheap: a save does one small `get` (a metadata record) plus two puts, and only reads the stored datasets back when the store has drifted past the cap plus a little slack. Snapshots live in this browser only — an exported backup file ([§10](#10-backup--restore-flow)) is still what moves them between machines.
 
 ### 12.7 Merge, don't overwrite, on import
 
-"Import New Items Only" and the contact-level merge union the message histories and keep the newest subject/timestamp (`mergeContactRecords`) rather than skipping entities that exist on both sides. Two machines working on the same contact converge instead of one silently winning.
+"Import New Items Only" and the contact-level merge union the message histories and keep the newest subject/timestamp (`mergeContactRecords`) rather than skipping entities that exist on both sides. Two machines working on the same contact converge instead of one silently winning. The same rule applies to sync conflicts: `mergeSyncData()` unions folders, groups and contacts so **Merge Both** can resolve a conflict without discarding anything.
 
-### 12.8 Status is derived, never assumed
+### 12.8 A conflict can always be merged, and a lossy pull is refused
+
+Two moves keep history from disappearing between computers:
+
+```javascript
+// 1. The pull guard — refuse to silently replace local with a file that holds less.
+if (fileChanged && !localChanged
+    && countMessagesMissingFromFile(activeData, fileNormalized) === 0) {
+  doPull();
+  return;
+}
+
+// 2. The merge resolution — union both sides, then push the result.
+const merged = mergeSyncData(data, syncConflictData.parsed);
+setData(merged);
+await pushToHandle(syncConflictData.handle, nextRev, merged);
+```
+
+`countMessagesMissingFromFile()` only counts messages missing from *contacts that exist on both sides* — a contact the file simply does not have is a normal deletion, not lost history. Keeping the guard that narrow means it never fires during an ordinary forward sync, so it stays trustworthy rather than becoming a prompt the user learns to dismiss.
+
+### 12.9 Never resolve against a file you could not read
+
+`readSyncFile()` leaves `parsed` as `null` when the text is not a valid Batch Emailer file (truncated write, wrong file picked in the dialog). Passing that into the decision engine would compute a `null` dataset and pull it into app state. The sync path therefore refuses first — `fileHasContent && !fileHasData` → error toast, stop — and an *empty* file is normalised to an empty dataset rather than to `null`.
+
+### 12.10 Status is derived, never assumed
 
 `idle | synced | local-changes | external-update | syncing | error` is recomputed from `syncMeta` after every operation, so a cancelled file picker, a permission denial or a conflict modal cannot leave a green light on.
 
-### 12.9 Verification scripts — the part to copy first
+### 12.11 Verification scripts — the part to copy first
 
 `npm run verify` runs three Node scripts that bundle the app source with esbuild (JSX included), stub `localStorage` / `navigator` / `window` / `document`, and assert behaviour with no browser at all:
 
 | Script | What it proves |
 | :--- | :--- |
-| `verify-backup` | file round-trip, hashes, counts, order & nesting, merge behaviour |
+| `verify-backup` | file round-trip, hashes, counts, order & nesting, import merge, conflict merge, pull guard, backup-history pruning |
 | `verify-import` | contact-import parsers and the review step |
 | `verify-sidebar` | server-rendered sidebar, drag-order helpers, and that the **shipped bundle** still contains the handlers/menus |
 
@@ -982,6 +1031,10 @@ They finish in about a second, which is why the sync logic can be changed confid
 * Keeping per-device UI state in the file, so a drag reorder on one device becomes a conflict on another.
 * Auto-applying a file because a notification appeared — the bar reports, the engine decides.
 * Forgetting the BOM strip / line-ending normalisation before `JSON.parse` ([§11.3](#113-windows-utf-8-bom)).
+* Offering only *keep mine* / *keep theirs* on a conflict: one careless click discards the other machine's history and there is no undo. Ship a **Merge Both**, and show each side's message count so the choice is not blind.
+* Marking a restore-from-backup as *already synced*. The base then describes content that was never written to the sync file, so the next sync reads local as unchanged and silently pulls the file over it — the restored history is gone one sync later.
+* Pulling `parsed === null` into app state because a file failed to parse.
+* Keeping a single auto-backup record that every change overwrites: it looks like a safety net but never survives the incident it was meant to cover.
 
 ---
 

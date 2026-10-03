@@ -7,7 +7,7 @@ import {
     Sun, Moon, Sparkles, Coffee, AlertTriangle, CheckCircle2, Cloud, CloudOff,
     Pin, PinOff, FolderPlus
 } from 'lucide-react';
-import { getSyncHandle, setSyncHandle, clearSyncHandle, putAutoBackup } from './syncStorage.js';
+import { getSyncHandle, setSyncHandle, clearSyncHandle, putAutoBackup, listAutoBackups, getAutoBackup } from './syncStorage.js';
 
 // --- Utility Functions ---
 const generateId = () => crypto.randomUUID();
@@ -320,6 +320,39 @@ function countEmailMessages(source) {
     }, 0);
 }
 
+// Identifies one log entry the same way mergeContactRecords does, so a message
+// counts as present (or missing) whether or not its entry carries an id.
+function historyLogKey(log) {
+    if (!log || typeof log !== 'object') return '';
+    if (log.id) return String(log.id);
+    return `${log.timestamp || ''}|${log.message || ''}|${log.subject || ''}`;
+}
+
+// How many of `local`'s email messages are absent from `file`, counting only
+// contacts that exist on both sides. This is the case a plain pull would
+// destroy silently: the sync file has moved on but it holds fewer messages
+// than this device still has (somebody overwrote it with less). A contact the
+// file does not have at all is a normal deletion and is deliberately not
+// counted here — that is ordinary sync, not lost history.
+function countMessagesMissingFromFile(local, file) {
+    const fileKeys = new Map();
+    ((file && file.students) || []).forEach(s => {
+        if (!s) return;
+        fileKeys.set(s.id, new Set((s.emailHistory || []).map(historyLogKey)));
+    });
+
+    let missing = 0;
+    ((local && local.students) || []).forEach(s => {
+        if (!s) return;
+        const inFile = fileKeys.get(s.id);
+        if (!inFile) return;
+        (s.emailHistory || []).forEach(log => {
+            if (log && !inFile.has(historyLogKey(log))) missing += 1;
+        });
+    });
+    return missing;
+}
+
 // Folder/group/contact/message counts — shown to the user and used to prove a
 // written backup file contains the same amount of data as the app.
 function getDataSummary(source) {
@@ -378,6 +411,38 @@ function mergeContactRecords(local, incoming) {
     };
 }
 
+// Unions two datasets so a sync conflict can be resolved without discarding
+// either computer's work. Local keeps its own arrangement (drag order, pinning,
+// subfolder nesting) and everything the file has that local doesn't is appended
+// in file order; contacts present on both sides are merged through
+// mergeContactRecords, so an email message that exists on only one side always
+// survives. Nothing is ever dropped, which is the whole point: a conflict is
+// not a reason to lose messages.
+function mergeSyncData(local, incoming) {
+    const localFolders = (local && local.folders) || [];
+    const fileFolders = (incoming && incoming.folders) || [];
+    const folderIds = new Set(localFolders.map(f => f.id));
+    // Union, never subtraction: a parentId/folderId pointing at the other side
+    // can only stay valid if the folder it names is kept too.
+    const folders = [...localFolders, ...fileFolders.filter(f => !folderIds.has(f.id))];
+
+    const localClasses = (local && local.classes) || [];
+    const fileClasses = (incoming && incoming.classes) || [];
+    const classIds = new Set(localClasses.map(c => c.id));
+    const classes = [...localClasses, ...fileClasses.filter(c => !classIds.has(c.id))];
+
+    const localStudents = (local && local.students) || [];
+    const fileStudents = (incoming && incoming.students) || [];
+    const fileById = new Map(fileStudents.map(s => [s.id, s]));
+    const localIds = new Set(localStudents.map(s => s.id));
+    const students = [
+        ...localStudents.map(s => (fileById.has(s.id) ? mergeContactRecords(s, fileById.get(s.id)) : s)),
+        ...fileStudents.filter(s => !localIds.has(s.id))
+    ];
+
+    return { folders, classes, students };
+}
+
 // Builds the exact file body shared by backups, sync writes and auto-pushes.
 // Everything the app stores travels in here, unmodified.
 async function buildBackupPayload(activeData, revision) {
@@ -412,7 +477,9 @@ async function buildBackupPayload(activeData, revision) {
 export {
     encryptExport, parseExport, getCanonicalData, normalizeImportedData,
     buildBackupPayload, verifyBackupRoundTrip, getDataSummary,
-    describeDataSummary, countEmailMessages, mergeContactRecords, readBackupSettings,
+    describeDataSummary, countEmailMessages, mergeContactRecords, mergeSyncData,
+    countMessagesMissingFromFile,
+    readBackupSettings,
     parseContactsFromText, buildContactRecords, parseCSV,
     IMPORT_EXAMPLE_PASTE, IMPORT_EXAMPLE_CSV,
     buildExistingContactIndex, planContactImport,
@@ -549,6 +616,15 @@ function setSyncMeta(updates) {
     }
 }
 
+// Records that the app's data now differs from what the sync file holds, so
+// the next sync knows it has something to push instead of reading local as
+// "unchanged" and pulling the file over it. Ordinary edits are caught by the
+// [data] effect; code that builds a fresh dataset by hand (merging a backup
+// into local data) calls this directly. Referenced by SYNC_AND_BACKUP_SYSTEM.md.
+function noteLocalChange() {
+    setSyncMeta({ lastLocalChange: Date.now() });
+}
+
 function syncNeedsPush(currentData = null) {
     const meta = getSyncMeta();
     if (!meta.fileName) return false;
@@ -595,6 +671,10 @@ function generateDataFingerprint(dataObj = null) {
         folderCount: f.length,
         classCount: c.length,
         studentCount: s.length,
+        // Email history is the thing a user can least afford to lose, so the
+        // conflict dialog has to be able to show how many messages each side
+        // holds before the user picks a side.
+        messageCount: countEmailMessages({ students: s }),
         classes: classSummary,
         totalContacts: s.length,
         // Drag & drop makes ordering real user data, so it is fingerprinted too
@@ -673,6 +753,14 @@ function compareFingerprints(localFP, fileFP) {
         });
     }
 
+    if (localFP.messageCount !== fileFP.messageCount) {
+        differences.push({
+            type: "messageCount",
+            description: `Email messages: ${localFP.messageCount} local vs ${fileFP.messageCount} in file`,
+            items: []
+        });
+    }
+
     // Order-only differences: counts and names match, but the user arranged
     // things differently on each side.
     if (localFP.folderOrder !== fileFP.folderOrder) {
@@ -703,12 +791,22 @@ function compareFingerprints(localFP, fileFP) {
 // --- IndexedDB Sync Handle & Auto-Backup Storage ---
 // Opening the database, migrating older store layouts and reading/writing the
 // stored file handle all live in ./syncStorage.js.
+//
+// These snapshots are the in-browser safety net: they are written on every
+// change, kept as a small rolling history (not one record that each save
+// overwrites), and read back by the "Automatic Backups" list in Sync & Backup.
+// Storing the content hash lets the store skip a save whose content is
+// identical to the newest snapshot, and the summary lets the list show what a
+// snapshot contains without decrypting it.
 const saveAutoBackupToIDB = async (dataToSave) => {
     try {
+        const contentHash = await computeDataHash(getCanonicalData(dataToSave));
         const encrypted = await encryptExport(dataToSave);
         await putAutoBackup({
-            id: 'latest_auto_backup',
+            id: generateId(),
             timestamp: new Date().toISOString(),
+            contentHash,
+            summary: describeDataSummary(dataToSave),
             envelope: JSON.parse(encrypted)
         });
     } catch (err) {
@@ -1129,6 +1227,41 @@ export default function App() {
     const [pendingRestoreData, setPendingRestoreData] = useState(null);
     const [syncToast, setSyncToast] = useState(null);
     const [externalBanner, setExternalBanner] = useState(null);
+    // Rolling in-browser backup history (see saveAutoBackupToIDB). Loaded when
+    // the Sync & Backup screen opens rather than on every save — reading the
+    // snapshots back is the expensive half of the safety net.
+    const [autoBackupList, setAutoBackupList] = useState([]);
+
+    useEffect(() => {
+        if (!modals.backup) return;
+        let stale = false;
+        (async () => {
+            try {
+                const records = await listAutoBackups();
+                if (stale) return;
+                // Records written by older builds carry no summary; decrypt just
+                // those so the list can show what each snapshot contains.
+                const list = await Promise.all(records.map(async (record) => {
+                    if (record.summary) return { id: record.id, timestamp: record.timestamp, summary: record.summary };
+                    try {
+                        const parsed = await parseExport(JSON.stringify(record.envelope));
+                        return {
+                            id: record.id,
+                            timestamp: record.timestamp,
+                            summary: parsed ? describeDataSummary(normalizeImportedData(parsed)) : 'contents unreadable'
+                        };
+                    } catch {
+                        return { id: record.id, timestamp: record.timestamp, summary: 'contents unreadable' };
+                    }
+                }));
+                if (!stale) setAutoBackupList(list);
+            } catch (error) {
+                console.warn("[Backup] Could not list automatic backups:", error);
+                if (!stale) setAutoBackupList([]);
+            }
+        })();
+        return () => { stale = true; };
+    }, [modals.backup]);
 
     const showSyncToast = (message, type = "info") => {
         setSyncToast({ message, type, id: Date.now() });
@@ -1193,7 +1326,7 @@ export default function App() {
             const meta = getSyncMeta();
             // Data that already matches what we last synced is not an edit of
             // ours — it is the content a sync just wrote into app state (pull,
-            // "keep file" conflict resolution, restore from backup). Treating it
+            // "keep file" conflict resolution). Treating it
             // as a local change is what bumped lastLocalChange past
             // lastSyncedAt and left the Sync button lit after pulling updates.
             const matchesSyncedBase = !!meta.baseFastHash
@@ -2314,7 +2447,7 @@ export default function App() {
                 setSyncStatus('synced');
                 showSyncToast(`Synced — pushed changes to ${fileName}.`, 'success');
             } else if (onPushRequired) {
-                await onPushRequired(rev, localHash);
+                await onPushRequired(rev);
             }
         };
 
@@ -2363,8 +2496,11 @@ export default function App() {
         // Has the file changed since this device last synced?
         const fileChanged = baseHash ? (fileHash !== baseHash) : (fileRevision > baseRev);
 
-        // Only file changed -> clean PULL
-        if (fileChanged && !localChanged) {
+        // Only file changed -> clean PULL. The pull guard below stops it when
+        // the file has actually LOST messages this device still holds: that is
+        // not an update to accept, it is data to rescue, so it falls through to
+        // the conflict dialog where "Merge Both" puts the messages back.
+        if (fileChanged && !localChanged && countMessagesMissingFromFile(activeData, fileNormalized) === 0) {
             doPull();
             return;
         }
@@ -2376,11 +2512,18 @@ export default function App() {
             return;
         }
 
-        // Both changed -> True conflict
+        // Both changed -> True conflict. Also reached when the file is missing
+        // messages this device still holds (see the pull guard above), where
+        // local has not changed at all — the dialog says so instead of claiming
+        // there are unsynced local edits.
         const localFP = generateDataFingerprint(activeData);
         const fileFP = generateDataFingerprint(fileNormalized);
         const comparison = compareFingerprints(localFP, fileFP) || { differences: [], hasDifferences: true };
-        comparison.localDevice = `${getDeviceName()} (unsynced edits)`;
+        const missingMessages = countMessagesMissingFromFile(activeData, fileNormalized);
+        comparison.missingMessages = missingMessages;
+        comparison.localDevice = localChanged
+            ? `${getDeviceName()} (unsynced edits)`
+            : `${getDeviceName()} (matches last sync)`;
         comparison.fileDevice = fileMeta?.deviceName ? `${fileMeta.deviceName} (rev ${fileRevision})` : `Sync file (rev ${fileRevision})`;
 
         setSyncConflictData({
@@ -2427,9 +2570,22 @@ export default function App() {
             return;
         }
 
-        const { file, parsed } = fileResult;
+        const { file, parsed, fileHasData, fileHasContent } = fileResult;
+
+        // Never resolve against a file we could not read. readSyncFile leaves
+        // `parsed` null when the text is not a valid Batch Emailer file, and a
+        // null dataset flowing into doPull() would wipe app state (and with it
+        // every message) — better to refuse and let the user fix the file.
+        if (fileHasContent && !fileHasData) {
+            showSyncToast(`Can't sync — "${file.name}" is not a readable Batch Emailer file.`, "error");
+            setSyncStatus('error');
+            return;
+        }
+
         await executeSyncResolution({
-            parsed,
+            // A brand-new or empty file is an empty dataset, not "no data":
+            // passing null here would pull null into app state.
+            parsed: parsed || { folders: [], classes: [], students: [] },
             file,
             handle,
             isFirstSetup,
@@ -2523,8 +2679,10 @@ export default function App() {
 
     const handleSync = autoSync;
 
-    const mobilePushSync = async (fileName, revision = 1) => {
-        const { jsonStr, canonicalData, contentHash } = await buildSyncJSON(revision, data);
+    // `currentData` lets a conflict resolution push a merged dataset instead
+    // of the still-stale `data` captured when this sync started.
+    const mobilePushSync = async (fileName, revision = 1, currentData = null) => {
+        const { jsonStr, canonicalData, contentHash } = await buildSyncJSON(revision, currentData || data);
         const safeName = (fileName || getSyncMeta().fileName || "batch_emailer_sync").replace(/\.json$/i, "") + ".json";
 
         if (navigator.share && /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent)) {
@@ -2606,8 +2764,8 @@ export default function App() {
                 handle: null,
                 isFirstSetup: !getSyncMeta().fileName,
                 currentData: data,
-                onPushRequired: async (rev) => {
-                    await mobilePushSync(file.name, rev);
+                onPushRequired: async (rev, overrideData = null) => {
+                    await mobilePushSync(file.name, rev, overrideData);
                 }
             });
         } catch (e) {
@@ -2684,7 +2842,7 @@ export default function App() {
         setSyncStatus('synced');
         setShowSyncConflictModal(false);
         setSyncConflictData(null);
-        showAlert("Sync Resolved", "File data applied successfully.");
+        showAlert("Sync Resolved", "File data applied successfully. Anything that only existed on this device was discarded — use Merge Both if you did not mean to lose it.");
     };
 
     const handleResolveConflictKeepLocal = async () => {
@@ -2717,9 +2875,61 @@ export default function App() {
             setSyncStatus('synced');
             setShowSyncConflictModal(false);
             setSyncConflictData(null);
-            showAlert("Sync Resolved", "Overwrote sync file with your local data.");
+            showAlert("Sync Resolved", "Overwrote the sync file with your local data. Changes that only existed in the file were discarded — use Merge Both if you did not mean to lose it.");
         } catch (err) {
             showAlert("Resolution Failed", "Could not write to file: " + (err.message || err));
+        }
+    };
+
+    // Resolves a conflict by unioning both sides and pushing the result, so a
+    // sync never has to throw away one computer's email history to accept the
+    // other's. This is the resolution that cannot lose messages.
+    const handleResolveConflictMerge = async () => {
+        if (!syncConflictData) return;
+        try {
+            const merged = mergeSyncData(data, syncConflictData.parsed);
+            const nextRev = Math.max(syncConflictData.fileRevision || 0, getSyncMeta().baseRevision || 0) + 1;
+            setData(merged);
+
+            let pushed = false;
+            if (syncConflictData.handle) {
+                const { syncedAt, contentHash, fastHash } = await pushToHandle(syncConflictData.handle, nextRev, merged);
+                setSyncMeta({
+                    fileName: syncConflictData.fileName,
+                    lastSyncedRevision: nextRev,
+                    lastSyncedContentHash: contentHash,
+                    baseRevision: nextRev,
+                    baseContentHash: contentHash,
+                    baseFastHash: fastHash,
+                    lastSyncedAt: syncedAt,
+                    lastLocalChange: syncedAt,
+                    externalUpdateAvailable: false,
+                    externalUpdateAuthor: null
+                });
+                pushed = true;
+            } else if (syncConflictData.onPushRequired) {
+                // mobilePushSync() records the new base itself; it has to be
+                // handed `merged`, because the `data` captured when this sync
+                // started still holds the pre-merge local content.
+                await syncConflictData.onPushRequired(nextRev, merged);
+                pushed = true;
+            }
+
+            if (!pushed) {
+                // No way to write right now: keep the merge locally and leave
+                // it flagged as unsynced instead of pretending it was written.
+                setSyncMeta({ lastLocalChange: Date.now() });
+            }
+
+            setSyncFileName(syncConflictData.fileName);
+            setSyncStatus(pushed ? 'synced' : 'local-changes');
+            setShowSyncConflictModal(false);
+            setSyncConflictData(null);
+            showAlert("Sync Merged", pushed
+                ? `Kept everything from both sides — ${describeDataSummary(merged)}.`
+                : `Merged both sides locally — ${describeDataSummary(merged)}. Press Sync to write it to the file.`);
+        } catch (err) {
+            showAlert("Merge Failed", "Could not write the merged data: " + (err.message || err));
         }
     };
 
@@ -2790,13 +3000,41 @@ export default function App() {
         }
     };
 
+    // Restores a snapshot from the in-browser backup history. It goes through
+    // the same restore-choice modal as a file backup, so the user still picks
+    // between replacing everything and merging — merging being the option that
+    // can only add email messages, never lose them.
+    const restoreFromAutoBackup = async (id) => {
+        try {
+            const record = await getAutoBackup(id);
+            if (!record || !record.envelope) {
+                showAlert("Restore Failed", "That automatic backup is no longer available.");
+                return;
+            }
+
+            const parsed = await parseExport(JSON.stringify(record.envelope));
+            const hasData = parsed && (Array.isArray(parsed.folders) || Array.isArray(parsed.classes) || Array.isArray(parsed.students));
+            if (!hasData) {
+                showAlert("Restore Failed", "That automatic backup does not contain readable app data.");
+                return;
+            }
+
+            setPendingRestoreData({
+                normalized: normalizeImportedData(parsed),
+                raw: parsed,
+                settings: readBackupSettings(parsed),
+                fileName: `Automatic backup · ${formatDate(record.timestamp)}`
+            });
+            setShowRestoreChoiceModal(true);
+        } catch (err) {
+            console.error("Automatic backup restore error:", err);
+            showAlert("Restore Failed", "Could not read that automatic backup: " + (err.message || err));
+        }
+    };
+
     const handleRestoreReplaceAll = async () => {
         if (!pendingRestoreData) return;
-        const { normalized, raw, settings, fileName } = pendingRestoreData;
-        const canonical = getCanonicalData(normalized);
-        const hash = await computeDataHash(canonical);
-        const fastHash = computeDataHashSync(canonical);
-        const fileRev = Number.isFinite(raw.syncMeta?.revision) ? raw.syncMeta.revision : 1;
+        const { normalized, settings } = pendingRestoreData;
 
         setData(normalized);
         if (settings && (settings.theme === 'light' || settings.theme === 'dark')) {
@@ -2805,21 +3043,27 @@ export default function App() {
         setActiveFolderId(null);
         setActiveClassId(null);
 
+        // The restored content has NOT been written to the sync file yet. The
+        // base must keep describing what the file actually holds, and local has
+        // to be flagged as changed: recording the restored content as "already
+        // synced" (and renaming the sync file after the backup) made the next
+        // sync read local as unchanged and silently pull the file over it,
+        // wiping the email history we had just restored. Now the next sync
+        // pushes it — or opens the conflict dialog, which can merge.
+        const hasSyncFile = !!getSyncMeta().fileName;
         setSyncMeta({
-            fileName: fileName || getSyncMeta().fileName,
-            baseRevision: fileRev,
-            lastSyncedRevision: fileRev,
-            baseContentHash: hash,
-            lastSyncedContentHash: hash,
-            baseFastHash: fastHash,
-            lastSyncedAt: Date.now()
+            lastLocalChange: Date.now(),
+            externalUpdateAvailable: false,
+            externalUpdateAuthor: null
         });
 
         setShowRestoreChoiceModal(false);
         setPendingRestoreData(null);
         closeModals();
-        setSyncStatus('synced');
-        showAlert("Restore Complete", "All data has been successfully replaced from the backup.");
+        setSyncStatus(hasSyncFile ? 'local-changes' : 'idle');
+        showAlert("Restore Complete", hasSyncFile
+            ? "All data has been replaced from the backup. Nothing has been written to the sync file yet — press Sync to push it."
+            : "All data has been successfully replaced from the backup.");
     };
 
     const handleRestoreImportNew = () => {
@@ -4016,6 +4260,43 @@ export default function App() {
                                 </label>
                             </div>
 
+                            {/* Automatic Backups Section */}
+                            <div className={`border rounded-xl p-4 text-left space-y-3 shadow-xs bg-gray-50/5 ${themeClasses.border}`}>
+                                <div className="flex items-center gap-2">
+                                    <History size={20} className="text-violet-500" />
+                                    <h4 className="font-semibold text-sm">Automatic Backups</h4>
+                                </div>
+                                <p className="text-xs text-gray-500 dark:text-gray-400 font-medium">
+                                    Saved in this browser every time something changes, kept as a rolling history at different points in time — so a sync or a bad restore can be undone. These live only in this browser; download a backup file to move them elsewhere.
+                                </p>
+                                {autoBackupList.length === 0 ? (
+                                    <p className={`text-[11px] ${themeClasses.textMuted}`}>
+                                        No automatic backups here yet — they start with your first change.
+                                    </p>
+                                ) : (
+                                    <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                                        {autoBackupList.map((backup, index) => (
+                                            <div key={backup.id} className={`flex items-center justify-between gap-3 px-3 py-2 rounded-lg border ${isDark ? 'border-[#4a474a] bg-[#221f22]' : 'border-[#e1d5e3] bg-white'}`}>
+                                                <div className="min-w-0">
+                                                    <p className={`text-xs font-bold ${themeClasses.textPrimary}`}>
+                                                        {formatDate(backup.timestamp)}
+                                                        {index === 0 && <span className={`ml-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded-full align-middle ${isDark ? 'bg-[#a9dc76]/15 text-[#a9dc76]' : 'bg-[#eef7e6] text-[#3f7a1a]'}`}>latest</span>}
+                                                    </p>
+                                                    <p className={`text-[10px] truncate ${themeClasses.textMuted}`}>{backup.summary}</p>
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => restoreFromAutoBackup(backup.id)}
+                                                    className={`shrink-0 px-3 py-1.5 rounded-lg text-[11px] font-bold transition-all active:scale-95 ${themeClasses.btnSecondary}`}
+                                                >
+                                                    Restore
+                                                </button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+
                         </div>
                     </div>
                 </div>
@@ -4263,20 +4544,30 @@ export default function App() {
                             <AlertTriangle className="flex-shrink-0 text-amber-400" size={22} />
                             <div>
                                 <h3 className={`font-extrabold text-base tracking-tight ${themeClasses.textPrimary}`}>Sync Conflict</h3>
-                                <p className={`text-xs ${themeClasses.textMuted}`}>Both local data and the sync file have changes.</p>
+                                <p className={`text-xs ${themeClasses.textMuted}`}>
+                                    {(syncConflictData.comparison && syncConflictData.comparison.missingMessages > 0)
+                                        ? 'The sync file is missing messages this device still has.'
+                                        : 'Both local data and the sync file have changes.'}
+                                </p>
                             </div>
                         </div>
                         <div className="p-5 space-y-3 max-h-64 overflow-y-auto">
                             {syncConflictData.comparison && (
                                 <div className={`p-2.5 rounded-lg text-xs space-y-1 border ${isDark ? 'border-[#4a474a] bg-[#221f22]' : 'border-[#e1d5e3] bg-gray-50'}`}>
-                                    <div className="flex justify-between items-center">
+                                    <div className="flex justify-between items-center gap-2">
                                         <span className="font-semibold text-[#fc9867]">Local:</span>
-                                        <span className={`text-[11px] ${themeClasses.textMuted}`}>{syncConflictData.comparison.localDevice || getDeviceName()}</span>
+                                        <span className={`text-[11px] text-right ${themeClasses.textMuted}`}>{syncConflictData.comparison.localDevice || getDeviceName()}<br />{countEmailMessages(data)} email messages</span>
                                     </div>
-                                    <div className="flex justify-between items-center">
+                                    <div className="flex justify-between items-center gap-2">
                                         <span className="font-semibold text-[#78dce8]">Sync File:</span>
-                                        <span className={`text-[11px] ${themeClasses.textMuted}`}>{syncConflictData.comparison.fileDevice || syncConflictData.fileName}</span>
+                                        <span className={`text-[11px] text-right ${themeClasses.textMuted}`}>{syncConflictData.comparison.fileDevice || syncConflictData.fileName}<br />{countEmailMessages(syncConflictData.parsed)} email messages</span>
                                     </div>
+                                </div>
+                            )}
+                            {syncConflictData.comparison && syncConflictData.comparison.missingMessages > 0 && (
+                                <div className="px-3 py-2 rounded-lg text-xs border border-amber-500/40 bg-amber-500/10 text-amber-400 font-semibold leading-snug">
+                                    The file is missing {syncConflictData.comparison.missingMessages} email message{syncConflictData.comparison.missingMessages === 1 ? '' : 's'} this device has.
+                                    {' '}Merge Both puts {syncConflictData.comparison.missingMessages === 1 ? 'it' : 'them'} back.
                                 </div>
                             )}
                             {syncConflictData.comparison && syncConflictData.comparison.hasDifferences ? (
@@ -4295,12 +4586,22 @@ export default function App() {
                                     ))}
                                 </div>
                             ) : (
-                                <p className={`text-sm ${themeClasses.textSecondary}`}>Both sides have unseen changes. Choose which version to keep.</p>
+                                <p className={`text-sm ${themeClasses.textSecondary}`}>Both sides have unseen changes. Merge Both keeps everything, or pick the side you want to keep.</p>
                             )}
                         </div>
                         <div className="p-4 bg-gray-50/5 border-t space-y-2">
-                            <p className={`text-[11px] font-bold ${themeClasses.textMuted} mb-2`}>Which version do you want to keep?</p>
-                            <div className="flex gap-2">
+                            <p className={`text-[11px] font-bold ${themeClasses.textMuted} mb-2`}>How do you want to resolve this?</p>
+                            <button
+                                type="button"
+                                onClick={handleResolveConflictMerge}
+                                className={`w-full py-2.5 rounded-lg text-xs font-bold transition-all active:scale-95 ${isDark ? 'bg-[#a9dc76]/10 text-[#a9dc76] border border-[#a9dc76]/30 hover:bg-[#a9dc76]/20' : 'bg-[#eef7e6] text-[#3f7a1a] border border-[#a9dc76]/60 hover:bg-[#e4f1d7]'}`}
+                            >
+                                Merge Both — Keep Everything
+                            </button>
+                            <p className={`text-[10px] leading-snug ${themeClasses.textMuted}`}>
+                                Keeps the folders, contacts and every email message from both sides, then writes the result to the file.
+                            </p>
+                            <div className="flex gap-2 pt-1">
                                 <button
                                     type="button"
                                     onClick={handleResolveConflictKeepFile}
@@ -4316,6 +4617,9 @@ export default function App() {
                                     Keep My Local Data
                                 </button>
                             </div>
+                            <p className={`text-[10px] leading-snug ${themeClasses.textMuted}`}>
+                                Keeping only one side discards the other side's changes, including its email history.
+                            </p>
                         </div>
                     </div>
                 </div>
