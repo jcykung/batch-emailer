@@ -163,7 +163,7 @@ try {
     assert.equal(pasteExample.length, 3, 'paste example: header skipped, 3 contacts');
     assert.equal(pasteExample[0].name, 'Jamie Rivera');
     assert.deepEqual(pasteExample[0].emails,
-        ['jamie.rivera@example.com', 'parent@example.org'],
+        ['jamie.rivera@example.com', 'backup@example.org'],
         'paste example: the tab row keeps both emails');
     assert.equal(pasteExample[0].notes, 'Sibling: Alex Rivera');
     assert.equal(pasteExample[1].name, 'Priya Nair');
@@ -171,14 +171,14 @@ try {
     assert.equal(pasteExample[1].notes, 'Class rep');
     assert.equal(pasteExample[2].name, 'Sam Lee');
     assert.deepEqual(pasteExample[2].emails,
-        ['sam.lee@example.com', 'parent@example.com'],
+        ['sam.lee@example.com', 'backup@example.com'],
         'paste example: both stacked lines belong to Sam Lee');
 
     const csvExample = buildContactRecords(parseCSV(IMPORT_EXAMPLE_CSV));
     assert.equal(csvExample.length, 3, 'CSV example: header skipped, 3 contacts');
     assert.equal(csvExample[0].name, 'Jamie Rivera');
     assert.deepEqual(csvExample[0].emails,
-        ['jamie.rivera@example.com', 'parent@example.org']);
+        ['jamie.rivera@example.com', 'backup@example.org']);
     assert.equal(csvExample[0].notes, 'Sibling: Alex Rivera');
     assert.equal(csvExample[1].name, 'Priya Nair');
     assert.deepEqual(csvExample[1].emails, ['priya.nair@example.com'],
@@ -186,7 +186,7 @@ try {
     assert.equal(csvExample[1].notes, 'Class rep');
     assert.equal(csvExample[2].name, 'Sam Lee');
     assert.deepEqual(csvExample[2].emails,
-        ['sam.lee@example.com', 'parent@example.com']);
+        ['sam.lee@example.com', 'backup@example.com']);
     assert.equal(csvExample[2].notes, 'New neighbour');
 
     // --- 11. "Skip contacts already in …" only looks at the current group --

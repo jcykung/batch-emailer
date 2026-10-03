@@ -3846,7 +3846,7 @@ export default function App() {
                                             value={email}
                                             onChange={(e) => handleEmailValueChange(idx, e.target.value)}
                                             className={`flex-1 border rounded-xl p-2.5 outline-none transition-all font-medium text-sm ${themeClasses.inputBg}`}
-                                            placeholder={`Parent Email ${idx + 1}`}
+                                            placeholder={`Email ${idx + 1}`}
                                         />
                                         <button
                                             type="button"
@@ -4654,18 +4654,18 @@ export default function App() {
 // phone numbers), so no real contact data is ever shown or shipped.
 const IMPORT_EXAMPLE_PASTE = [
     'Name\tEmail\tEmail 2\tNotes',
-    'Jamie Rivera\tjamie.rivera@example.com\tparent@example.org\tSibling: Alex Rivera',
+    'Jamie Rivera\tjamie.rivera@example.com\tbackup@example.org\tSibling: Alex Rivera',
     'Priya Nair, priya.nair@example.com, Class rep',
     'Sam Lee',
     'sam.lee@example.com',
-    'parent@example.com'
+    'backup@example.com'
 ].join('\n');
 
 const IMPORT_EXAMPLE_CSV = [
     'Name,Email,Email 2,Notes',
-    'Jamie Rivera,jamie.rivera@example.com,parent@example.org,Sibling: Alex Rivera',
+    'Jamie Rivera,jamie.rivera@example.com,backup@example.org,Sibling: Alex Rivera',
     'Priya Nair,priya.nair@example.com,,Class rep',
-    'Sam Lee,sam.lee@example.com,parent@example.com,New neighbour'
+    'Sam Lee,sam.lee@example.com,backup@example.com,New neighbour'
 ].join('\n');
 
 // A preview row's emails cell ("a@x.com, b@y.com", or already an array).
@@ -5299,7 +5299,7 @@ function DraftEmailModal({ selectedStudents, closeModal, groupName, onLogMessage
                                                 {outlookClickedIdx === idx && (
                                                     <div className="mb-3 p-2.5 bg-yellow-500/15 border border-yellow-500/30 text-yellow-450 text-xs rounded-lg font-bold animate-pulse flex items-center gap-1.5">
                                                         <AlertCircle size={14} className="text-yellow-500 flex-shrink-0" />
-                                                        Outlook opened! Parent emails auto-copied—just press <strong>Ctrl+V</strong> (or <strong>Cmd+V</strong>) in the BCC field!
+                                                        Outlook opened! Your email addresses auto-copied—just press <strong>Ctrl+V</strong> (or <strong>Cmd+V</strong>) in the BCC field!
                                                     </div>
                                                 )}
 

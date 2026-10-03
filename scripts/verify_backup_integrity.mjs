@@ -74,7 +74,7 @@ try {
         students: [
             {
                 id: 's1', classId: 'g1', name: 'Alice Adams',
-                emails: ['alice@example.com', 'parent@example.com'],
+                emails: ['alice@example.com', 'backup@example.com'],
                 notes: 'Mom calls on Fridays',
                 timestamp: '2026-09-20T10:00:00.000Z',
                 message: 'Second message body',
