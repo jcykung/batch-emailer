@@ -3662,7 +3662,7 @@ export default function App() {
                                         className="text-[10px] font-mono text-[#ab9df2] bg-[#ab9df2]/10 border border-[#ab9df2]/20 px-1.5 py-0.5 rounded cursor-pointer hover:bg-[#ab9df2]/20 hover:text-white transition-colors"
                                         title="View Changelog"
                                     >
-                                        v1.6
+                                        v1.7
                                     </span>
                                 </span>
                                 {currentClass && (
@@ -4444,6 +4444,20 @@ export default function App() {
                             <button onClick={closeModals} className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-500/10 transition-colors"><X size={20} /></button>
                         </div>
                         <div className="p-6 space-y-4 overflow-y-auto min-h-0">
+                            <div className="space-y-2">
+                                <div className="flex items-center justify-between">
+                                    <span className="text-sm font-bold text-[#a9dc76]">v1.7</span>
+                                    <span className="text-[10px] text-gray-500 font-mono">2026-10-27</span>
+                                </div>
+                                <ul className="list-disc pl-4 text-xs space-y-1 text-gray-600 dark:text-gray-400">
+                                    <li><strong>Merge Both</strong> in the sync conflict dialog: keep everything from both sides — folders, groups, contacts and every email message — and push the combined result, instead of choosing which computer's work to throw away.</li>
+                                    <li>Sync can no longer silently drop <strong>email history</strong>: a pull stops and opens the conflict dialog when the file holds fewer messages than this device, resolving against an unreadable file is refused, and the conflict dialog now shows the local and file message counts.</li>
+                                    <li><strong>Automatic backups are now a rolling history</strong> — up to 12 snapshots kept at widening intervals (1, 3, 7, 15 … minutes) so they cover days rather than your last 12 edits, unchanged saves are skipped, and each snapshot is listed in <strong>Sync &amp; Backup</strong> with a Restore button.</li>
+                                    <li>Restoring a backup no longer leaves the app believing it is already synced (which made the next sync pull over the restored data).</li>
+                                    <li>The <strong>Add Contact</strong> dialog can pull contacts out of another existing group: pick a group, tick the people you want, and <strong>Add Selected</strong> copies them in — anyone whose email is already in the current group is skipped so repeat clicks can't duplicate a contact.</li>
+                                    <li>Email fields and import examples now use generic <code>Email 1</code> / <code>backup@example.org</code> placeholders instead of parent-specific wording.</li>
+                                </ul>
+                            </div>
                             <div className="space-y-2">
                                 <div className="flex items-center justify-between">
                                     <span className="text-sm font-bold text-[#a9dc76]">v1.6</span>
