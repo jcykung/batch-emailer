@@ -1174,6 +1174,11 @@ export default function App() {
     // Dynamic email inputs state for modal
     const [modalEmails, setModalEmails] = useState(['']);
 
+    // "Add from another group": the group being browsed and the contacts ticked
+    // inside it. Reset every time the Add Contact modal opens.
+    const [copySourceClassId, setCopySourceClassId] = useState('');
+    const [copySelectedIds, setCopySelectedIds] = useState([]);
+
     // Handle data migration explicitly on component mount/load rather than in the generic hook
     useEffect(() => {
         if (data && data.students) {
@@ -1498,6 +1503,10 @@ export default function App() {
     ], pinnedOrder);
     const currentClass = data.classes.find(c => c.id === activeClassId);
     const classStudents = data.students.filter(s => s.classId === activeClassId);
+    // Contacts of the group browsed in the "Add from another group" picker.
+    const copySourceStudents = copySourceClassId
+        ? data.students.filter(s => s.classId === copySourceClassId)
+        : [];
 
     // Helper trigger for custom dialogs
     const showAlert = (title, message) => {
@@ -2074,6 +2083,8 @@ export default function App() {
         setEditingItem(null);
         setFolderModalParentId('');
         setClassModalFolderId('');
+        setCopySourceClassId('');
+        setCopySelectedIds([]);
         setShowSyncConflictModal(false);
         setSyncConflictData(null);
         setShowRestoreChoiceModal(false);
@@ -2084,6 +2095,8 @@ export default function App() {
         setEditingItem(item);
         if (type === 'student') {
             setModalEmails(item && item.emails && item.emails.length > 0 ? [...item.emails] : ['']);
+            setCopySourceClassId('');
+            setCopySelectedIds([]);
         } else {
             setModalEmails(['']);
         }
@@ -2108,6 +2121,64 @@ export default function App() {
             copy[index] = value;
             return copy;
         });
+    };
+
+    const toggleCopySelection = (studentId) => {
+        setCopySelectedIds(prev =>
+            prev.includes(studentId) ? prev.filter(id => id !== studentId) : [...prev, studentId]
+        );
+    };
+
+    // Copies the ticked contacts from the browsed group into the current group.
+    // Anyone whose email already exists here is skipped, so repeat clicks can't
+    // silently duplicate a contact.
+    const addContactsFromGroup = () => {
+        const emailKey = (email) => String(email || '').trim().toLowerCase();
+        const emailsHere = new Set(
+            classStudents.flatMap(s => (s.emails || []).map(emailKey)).filter(Boolean)
+        );
+        const picked = data.students.filter(s =>
+            s.classId === copySourceClassId && copySelectedIds.includes(s.id)
+        );
+        const toAdd = [];
+        let skippedCount = 0;
+
+        picked.forEach(s => {
+            const emails = (s.emails || []).map(email => String(email || '').trim()).filter(Boolean);
+            if (emails.some(email => emailsHere.has(emailKey(email)))) {
+                skippedCount += 1;
+            } else {
+                toAdd.push({
+                    id: generateId(),
+                    classId: activeClassId,
+                    name: s.name,
+                    emails: emails.length > 0 ? emails : [''],
+                    notes: s.notes || '',
+                    timestamp: '',
+                    message: '',
+                    emailHistory: []
+                });
+            }
+        });
+
+        if (toAdd.length > 0) {
+            setData(prev => ({ ...prev, students: [...prev.students, ...toAdd] }));
+        }
+
+        const sourceName = data.classes.find(c => c.id === copySourceClassId)?.name || 'another group';
+        const skippedNote = skippedCount > 0
+            ? ` ${skippedCount} contact${skippedCount === 1 ? ' was' : 's were'} skipped because ${skippedCount === 1 ? 'their email is' : 'their emails are'} already in this group.`
+            : '';
+
+        if (toAdd.length > 0) {
+            closeModals();
+            showAlert(
+                "Contacts Added",
+                `Added ${toAdd.length} contact${toAdd.length === 1 ? '' : 's'} from "${sourceName}" to this group.` + skippedNote
+            );
+        } else {
+            showAlert("Nothing Added", "Every selected contact already has an email in this group.");
+        }
     };
 
     // --- Dynamic PDF Export Feature ---
@@ -4108,6 +4179,68 @@ export default function App() {
                                 <label className={`block text-xs font-bold uppercase tracking-wider mb-1.5 ${isDark ? 'text-[#a9dc76]/70' : 'text-[#3f7a1a]/70'}`}>Notes</label>
                                 <textarea name="notes" defaultValue={editingItem?.notes || ''} rows="2" className={`w-full border rounded-xl p-2.5 outline-none transition-all font-medium text-sm ${themeClasses.inputBg}`} placeholder="e.g., Mother: Sarah Smith (sarah@example.com)"></textarea>
                             </div>
+
+                            {/* Copy contacts in from another group (new contacts only) */}
+                            {!editingItem && (
+                                <div className={`rounded-xl border p-3 space-y-2 ${themeClasses.border}`}>
+                                    <label className={`block text-xs font-bold uppercase tracking-wider ${isDark ? 'text-[#a9dc76]/70' : 'text-[#3f7a1a]/70'}`}>Add from Another Group</label>
+                                    <select
+                                        value={copySourceClassId}
+                                        onChange={(e) => { setCopySourceClassId(e.target.value); setCopySelectedIds([]); }}
+                                        aria-label="Copy contacts from group"
+                                        className={`w-full border rounded-xl p-2.5 outline-none transition-all font-medium text-sm ${themeClasses.inputBg}`}
+                                    >
+                                        <option value="">Choose a group…</option>
+                                        {data.classes.filter(c => c.id !== activeClassId).map(c => (
+                                            <option key={c.id} value={c.id} className="text-gray-800 dark:text-white dark:bg-[#3a373a]">
+                                                {c.name}{c.isArchived ? ' · archived' : ''}
+                                            </option>
+                                        ))}
+                                    </select>
+                                    {copySourceClassId && (
+                                        copySourceStudents.length === 0 ? (
+                                            <p className={`text-xs font-medium ${themeClasses.textMuted}`}>No contacts in this group.</p>
+                                        ) : (
+                                            <>
+                                                <div className={`max-h-48 overflow-y-auto rounded-lg border ${themeClasses.border}`}>
+                                                    {copySourceStudents.map(s => {
+                                                        const checked = copySelectedIds.includes(s.id);
+                                                        const emails = (s.emails || []).filter(Boolean);
+                                                        return (
+                                                            <label
+                                                                key={s.id}
+                                                                className={`flex items-start gap-2 px-2.5 py-2 cursor-pointer text-sm transition-colors ${checked ? (isDark ? 'bg-[#a9dc76]/10' : 'bg-[#a9dc76]/20') : (isDark ? 'hover:bg-white/5' : 'hover:bg-black/5')}`}
+                                                            >
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked={checked}
+                                                                    onChange={() => toggleCopySelection(s.id)}
+                                                                    className="mt-0.5 rounded text-blue-600 focus:ring-blue-500 cursor-pointer"
+                                                                />
+                                                                <span className="min-w-0">
+                                                                    <span className="block font-medium truncate">{s.name}</span>
+                                                                    <span className={`block text-[11px] break-all ${themeClasses.textMuted}`}>
+                                                                        {emails.length > 0 ? emails.join(', ') : 'No email'}
+                                                                    </span>
+                                                                </span>
+                                                            </label>
+                                                        );
+                                                    })}
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    onClick={addContactsFromGroup}
+                                                    disabled={copySelectedIds.length === 0}
+                                                    className={`w-full py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-all active:scale-[0.98] ${copySelectedIds.length === 0 ? 'bg-gray-200 text-gray-400 cursor-not-allowed shadow-none' : themeClasses.btnPrimary}`}
+                                                >
+                                                    <Copy size={14} /> Add Selected ({copySelectedIds.length})
+                                                </button>
+                                            </>
+                                        )
+                                    )}
+                                </div>
+                            )}
+
                             <div className="flex justify-between pt-2 items-center">
                                 {editingItem ? (
                                     <button type="button" onClick={() => deleteStudent(editingItem.id)} className="text-[#ff6188] hover:text-[#ff3864] text-sm hover:underline font-bold">Delete Contact</button>
