@@ -4446,6 +4446,15 @@ export default function App() {
                         <div className="p-6 space-y-4 overflow-y-auto min-h-0">
                             <div className="space-y-2">
                                 <div className="flex items-center justify-between">
+                                    <span className="text-sm font-bold text-[#a9dc76]">v1.8</span>
+                                    <span className="text-[10px] text-gray-500 font-mono">2026-11-08</span>
+                                </div>
+                                <ul className="list-disc pl-4 text-xs space-y-1 text-gray-600 dark:text-gray-400">
+                                    <li>Choosing <strong>Outlook Web</strong> now copies the BCC addresses and opens a confirmation dialog that says they are on the clipboard and asks you to paste them into the <strong>BCC</strong> field — <strong>Continue</strong> then opens Outlook. The purple "Outlook doesn't allow pre-filled emails" tip at the bottom of the drafts screen is gone, since it only applied to Outlook.</li>
+                                </ul>
+                            </div>
+                            <div className="space-y-2">
+                                <div className="flex items-center justify-between">
                                     <span className="text-sm font-bold text-[#a9dc76]">v1.7</span>
                                     <span className="text-[10px] text-gray-500 font-mono">2026-10-27</span>
                                 </div>
@@ -5532,7 +5541,7 @@ function DraftEmailModal({ selectedStudents, closeModal, groupName, onLogMessage
     const [batches, setBatches] = useState([]);
     const [copiedBccIdx, setCopiedBccIdx] = useState(null);
     const [copiedBodyIdx, setCopiedBodyIdx] = useState(null);
-    const [outlookClickedIdx, setOutlookClickedIdx] = useState(null);
+    const [outlookConfirm, setOutlookConfirm] = useState(null);
     const isDark = themeClasses.textPrimary.includes('text-[#fcfaf2]');
 
     // Track active timers for cleanup to prevent memory leaks
@@ -5631,12 +5640,14 @@ function DraftEmailModal({ selectedStudents, closeModal, groupName, onLogMessage
         // 1. Instantly copy BCC emails to clipboard silently
         handleCopyText(bccText, 'bcc', index, true);
 
-        // 2. Trigger UI instruction alert state
-        setOutlookClickedIdx(index);
-        safeTimeout(() => setOutlookClickedIdx(null), 7000);
+        // 2. Show the paste-into-BCC confirmation modal
+        setOutlookConfirm({ url, addressCount: bccText.split(',').filter(Boolean).length });
+    };
 
-        // 3. Open Outlook compose link
-        window.open(url, '_blank');
+    const handleOutlookContinue = () => {
+        if (!outlookConfirm) return;
+        window.open(outlookConfirm.url, '_blank');
+        setOutlookConfirm(null);
     };
 
     const openLink = (url) => {
@@ -5746,14 +5757,6 @@ function DraftEmailModal({ selectedStudents, closeModal, groupName, onLogMessage
                                                     </button>
                                                 </div>
 
-                                                {/* Outlook Helper Tooltip */}
-                                                {outlookClickedIdx === idx && (
-                                                    <div className="mb-3 p-2.5 bg-yellow-500/15 border border-yellow-500/30 text-yellow-450 text-xs rounded-lg font-bold animate-pulse flex items-center gap-1.5">
-                                                        <AlertCircle size={14} className="text-yellow-500 flex-shrink-0" />
-                                                        Outlook opened! Your email addresses auto-copied—just press <strong>Ctrl+V</strong> (or <strong>Cmd+V</strong>) in the BCC field!
-                                                    </div>
-                                                )}
-
                                                 {/* Action buttons */}
                                                 <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
                                                     <button onClick={() => openLink(gmailUrl)} className="flex items-center justify-center gap-2 py-2 px-3 bg-red-500/10 text-red-450 hover:bg-red-500/20 rounded-xl border border-red-500/20 text-sm font-bold transition-all active:scale-95">
@@ -5775,9 +5778,6 @@ function DraftEmailModal({ selectedStudents, closeModal, groupName, onLogMessage
                                 </div>
                             </div>
 
-                            <div className="bg-[#ab9df2]/10 border-l-4 border-[#ab9df2] p-4 text-[#ab9df2] text-xs font-semibold rounded-r-xl">
-                                <strong>💡 Tip:</strong> Because security configurations for Microsoft 365 or Gmail can sometimes hide or block automatic populating of the BCC field, clicking "Outlook Web" automatically copies the email addresses to your clipboard. Simply open the compose window, ensure the BCC field is visible, and press Paste (Ctrl+V) to paste the addresses to the BCC section!
-                            </div>
                         </div>
                     )}
                 </div>
@@ -5798,6 +5798,37 @@ function DraftEmailModal({ selectedStudents, closeModal, groupName, onLogMessage
                     )}
                 </div>
             </div>
+
+            {outlookConfirm && (
+                <div
+                    className="absolute inset-0 z-[60] bg-black/70 flex items-center justify-center p-4 backdrop-blur-xs"
+                    onClick={() => setOutlookConfirm(null)}
+                >
+                    <div
+                        className={`rounded-2xl shadow-2xl w-full max-w-md overflow-hidden border animate-in fade-in zoom-in-95 duration-200 ${themeClasses.cardBg}`}
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="p-6 text-center space-y-3">
+                            <div className="mx-auto w-12 h-12 rounded-full bg-[#a9dc76]/15 border border-[#a9dc76]/30 flex items-center justify-center">
+                                <Check size={24} className="text-[#a9dc76]" />
+                            </div>
+                            <h4 className="font-extrabold text-lg">Email Addresses Copied!</h4>
+                            <p className="text-sm text-[#c1c0c1] font-medium leading-relaxed">
+                                {outlookConfirm.addressCount} email address{outlookConfirm.addressCount === 1 ? '' : 'es'} copied to your clipboard. In the Outlook compose window, make sure the <strong>BCC</strong> field is visible, click into it, and press <strong>Ctrl+V</strong> (or <strong>Cmd+V</strong>) to paste them.
+                            </p>
+                        </div>
+                        <div className="p-4 border-t bg-gray-50/5 flex justify-end">
+                            <button
+                                onClick={handleOutlookContinue}
+                                className="px-6 py-2 bg-blue-500 hover:bg-blue-600 text-white font-bold rounded-xl shadow-md transition-all active:scale-95 flex items-center gap-2 text-xs"
+                            >
+                                <ExternalLink size={16} /> Continue to Outlook
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }
+
