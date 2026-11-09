@@ -3662,7 +3662,7 @@ export default function App() {
                                         className="text-[10px] font-mono text-[#ab9df2] bg-[#ab9df2]/10 border border-[#ab9df2]/20 px-1.5 py-0.5 rounded cursor-pointer hover:bg-[#ab9df2]/20 hover:text-white transition-colors"
                                         title="View Changelog"
                                     >
-                                        v1.7
+                                        v1.8
                                     </span>
                                 </span>
                                 {currentClass && (
