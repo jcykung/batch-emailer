@@ -14,6 +14,8 @@
 //   8. the conflict dialog is told how many messages each side holds
 //   9. the pull guard spots a file that lost messages this device still has
 //  10. the automatic backup history spreads over time instead of the last edits
+//  11. a stalled permission prompt or file read times out instead of hanging,
+//      and a lost handle keeps its error name so the file can be chosen again
 
 import { build } from 'esbuild';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -68,7 +70,8 @@ try {
         buildBackupPayload, verifyBackupRoundTrip, getDataSummary,
         describeDataSummary, countEmailMessages, mergeContactRecords,
         mergeSyncData, countMessagesMissingFromFile, getCanonicalData,
-        generateDataFingerprint, compareFingerprints
+        generateDataFingerprint, compareFingerprints,
+        SYNC_TIMEOUTS, withSyncTimeout, syncAccessLost, syncWriteError, describeSyncError
     } = app;
 
     // --- A realistic dataset, including legacy fields and log subjects -------
@@ -403,6 +406,50 @@ try {
     assert.equal(selectAutoBackupsToKeep(burst, AUTO_BACKUP_MAX_RECORDS).length, 1,
         'three saves in three minutes become one snapshot');
 
+    // --- 11. A sync cannot hang, and a lost handle is not a dead end --------
+    // A browser that never draws the permission prompt leaves requestPermission()
+    // pending forever, and a cloud file that stops answering does the same to the
+    // read. Both are time-boxed (§12.5), and an unanswered wait has to become the
+    // repairable NotAllowedError that autoSync() fixes by re-picking the file.
+    assert.deepEqual(SYNC_TIMEOUTS, { permission: 8000, read: 20000, file: 45000 },
+        'every file-side wait has a limit');
+
+    const hung = await withSyncTimeout(new Promise(() => {}), 'file permission', 20)
+        .then(() => null, (e) => e);
+    assert.ok(hung && hung.name === 'TimeoutError', 'a wait that never answers times out');
+    assert.match(hung.message, /did not respond in time/);
+    assert.match(hung.message, /Click Sync again/, 'and says what the user can do');
+
+    assert.equal(await withSyncTimeout(Promise.resolve('ok'), 'sync file', 20), 'ok',
+        'a wait that answers is returned untouched');
+
+    const original = Object.assign(new Error('nope'), { name: 'NotFoundError' });
+    const rethrown = await withSyncTimeout(Promise.reject(original), 'sync file', 20)
+        .then(() => null, (e) => e);
+    assert.equal(rethrown, original, 'a real failure is not disguised as a timeout');
+
+    const lost = syncAccessLost(new Error('pending forever'));
+    assert.equal(lost.name, 'NotAllowedError', 'an unanswered wait looks like lost access');
+    assert.match(lost.message, /chosen again/i, 'and the message says the file must be chosen again');
+    assert.ok(lost.cause, 'the original cause is kept for the console');
+    assert.match(describeSyncError(lost), /choose the file again/i,
+        'and what the user is shown is an instruction, not a DOMException message');
+
+    // The write path used to rethrow a plain Error, which hid the DOMException
+    // name that tells autoSync() the handle is repairable — the user was left
+    // with a dead end instead of "choose the file again".
+    const notReadable = Object.assign(new Error('The requested file could not be read.'), { name: 'NotReadableError' });
+    const writeError = syncWriteError(notReadable);
+    assert.equal(writeError.name, 'NotReadableError', 'a failed write keeps its error name');
+    assert.match(writeError.message, /still downloading|open in another app/,
+        'and explains that the file may be busy instead of a bare message');
+    assert.match(describeSyncError(notReadable), /still downloading|open in another app/,
+        'the same explanation is what the user is shown');
+    for (const name of ['NotAllowedError', 'NotFoundError', 'SecurityError']) {
+        assert.equal(syncWriteError(Object.assign(new Error('x'), { name })).name, name,
+            `${name} survives the write path too`);
+    }
+
     // --- Human readable summary ---------------------------------------------
     const line = describeDataSummary(dataset);
     assert.match(line, /2 folders, 3 groups, 4 contacts and 3 email messages/, 'summary wording');
@@ -414,6 +461,8 @@ try {
     console.log('  - a sync file that lost messages is caught instead of pulled over the top');
     console.log('  - the automatic backup history spreads its slots over time, not over the last edits');
     console.log('  - drag & drop order and subfolder nesting survive the file and its hash');
+    console.log('  - a stalled permission prompt or file read times out instead of hanging the sync');
+    console.log('  - a lost handle keeps its error name, so the file can be chosen again');
 } finally {
     await rm(outDir, { recursive: true, force: true });
 }

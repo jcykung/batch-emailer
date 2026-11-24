@@ -936,7 +936,9 @@ The three spellings plus a text match are needed because engines disagree on how
 
 ### 12.5 Errors are translated before they are shown
 
-`describeSyncError()` turns IndexedDB/permission `DOMException`s into an instruction ("choose the file again", "reconnect"), and a dead file handle (renamed, moved, permission lost) is cleared automatically so the next sync re-picks the file instead of failing forever. A raw `e.message` is never the final UI.
+`describeSyncError()` turns IndexedDB/permission `DOMException`s into an instruction ("choose the file again", "reconnect"), and a dead file handle (renamed, moved, permission lost) is cleared automatically so the next sync re-picks the file instead of failing forever. A raw `e.message` is never the final UI. A failed *write* goes through `syncWriteError()`, which keeps the `DOMException` name while replacing the message: a rethrown plain `Error` would hide the `NotReadableError` that tells `autoSync()` the handle is repairable.
+
+**No wait may hang.** A sync file is timed in three stages (`SYNC_TIMEOUTS` in `src/App.jsx`): the permission query at 8 s, the read at 20 s, and the whole decision + write at 45 s. The permission stage matters most: `requestPermission()` shows a browser prompt that some Chromium builds and tab-isolated forks never render, so the promise stays pending forever and the sync looks dead. An unanswered permission query *or* read is therefore converted to `NotAllowedError` (`syncAccessLost()`), which `autoSync()` already repairs by clearing the handle and opening the picker — choosing the file grants access inside the same click, with no prompt to depend on. A picker itself is never timed: it waits for the user.
 
 ### 12.6 An automatic browser backup on every change
 

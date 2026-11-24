@@ -486,7 +486,8 @@ export {
     moveItemInList, moveGroupToFolder, moveGroupBesideGroup, moveIdInList,
     collectSubtreeIds, isDescendantFolder, moveFolderRelative,
     sortByPinnedOrder,
-    generateDataFingerprint, compareFingerprints
+    generateDataFingerprint, compareFingerprints,
+    SYNC_TIMEOUTS, withSyncTimeout, syncAccessLost, syncWriteError, describeSyncError
 };
 
 // Decrypts a file we just wrote and proves it still holds every folder, group,
@@ -650,7 +651,64 @@ function describeSyncError(error) {
     if (error && error.name === "AbortError") {
         return "the operation was cancelled.";
     }
+    if (error && error.name === "NotAllowedError") {
+        return "permission to the sync file was lost — click Sync and choose the file again.";
+    }
+    if (error && error.name === "NotReadableError") {
+        return "the sync file can't be opened right now — it may be open in another app, or its cloud folder may still be downloading.";
+    }
+    if (error && error.name === "NotFoundError") {
+        return "the sync file was moved or deleted — click Sync and choose it again.";
+    }
     return message;
+}
+
+// A sync file can sit on a cloud drive that stops answering, and some Chromium
+// builds never render the file-permission prompt at all, leaving
+// requestPermission() pending forever. Every file-side wait is therefore
+// time-boxed (see §12.5 of SYNC_AND_BACKUP_SYSTEM.md), and an unanswered wait
+// counts as lost access so the next step is "choose the file again" instead of
+// a Sync button that never comes back. A picker is never timed — that one waits
+// for the user.
+const SYNC_TIMEOUTS = { permission: 8000, read: 20000, file: 45000 };
+
+function withSyncTimeout(promise, label = "sync file", ms = SYNC_TIMEOUTS.file) {
+    return new Promise((resolve, reject) => {
+        let timer = null;
+        const done = () => { if (timer) clearTimeout(timer); };
+        timer = setTimeout(() => {
+            const error = new Error(`The ${label} did not respond in time — it may still be downloading, or open in another app. Click Sync again, and if it happens again, choose the file again.`);
+            error.name = "TimeoutError";
+            reject(error);
+        }, ms);
+        promise.then(
+            value => { done(); resolve(value); },
+            error => { done(); reject(error); }
+        );
+    });
+}
+
+// A handle the browser will not answer for is as good as lost: the caller can
+// repair it in one click by choosing the file again, so say that rather than
+// waiting on a prompt the browser may never show.
+function syncAccessLost(cause) {
+    const error = new Error("This browser needs the sync file chosen again before it can be read or written.");
+    error.name = "NotAllowedError";
+    if (cause) error.cause = cause;
+    return error;
+}
+
+// A failed write must keep its DOMException name: autoSync() decides from it
+// whether choosing the file again can repair the handle, and a rethrown plain
+// Error would turn that recovery into a dead end.
+function syncWriteError(e) {
+    const message = e.name === "NotAllowedError" ? "Permission denied — the file may have been moved or deleted."
+        : e.name === "NotFoundError" ? "File not found — it may have been moved or deleted."
+        : e.name === "NotReadableError" ? "The file can't be opened for writing — it may be open in another app, or its cloud folder may still be downloading."
+        : (e.message || "The sync file could not be written.");
+    const error = new Error(message);
+    error.name = e.name || "Error";
+    return error;
 }
 
 // --- Fingerprinting & Difference Engine ---
@@ -2440,14 +2498,9 @@ export default function App() {
             await writable.write(jsonStr);
             await writable.close();
         } catch (e) {
-            if (e.name === "NotAllowedError") {
-                throw new Error("Permission denied — the file may have been moved or deleted.");
-            } else if (e.name === "NotFoundError") {
-                throw new Error("File not found — it may have been moved or deleted.");
-            } else if (e.name === "NotReadableError") {
-                throw new Error("File is not readable — it may be open in another app.");
-            }
-            throw e;
+            // Keep the DOMException name (see syncWriteError): autoSync() reads
+            // it to decide whether choosing the file again can repair the handle.
+            throw syncWriteError(e);
         }
         const syncedAt = Date.now();
         const fastHash = computeDataHashSync(canonicalData);
@@ -2614,31 +2667,41 @@ export default function App() {
     const syncWithHandle = async (handle, isFirstSetup = false) => {
         let perm;
         try {
-            perm = await handle.queryPermission({ mode: "readwrite" });
+            perm = await withSyncTimeout(handle.queryPermission({ mode: "readwrite" }), "file permission", SYNC_TIMEOUTS.permission);
         } catch (e) {
-            showSyncToast("Can't check file permission — " + e.message, "error");
-            return;
+            throw syncAccessLost(e);
         }
 
         if (perm !== "granted") {
+            // Say what we are waiting for: the prompt belongs to the browser, not
+            // the page, so a user who sees nothing has no way to guess why
+            // nothing happens.
+            const hint = setTimeout(() => {
+                showSyncToast("Waiting for this browser's file-permission prompt — if none appears, sync will ask you to pick the file again.", "info");
+            }, 2000);
             try {
-                perm = await handle.requestPermission({ mode: "readwrite" });
+                perm = await withSyncTimeout(handle.requestPermission({ mode: "readwrite" }), "file permission", SYNC_TIMEOUTS.permission);
             } catch (e) {
-                showSyncToast("Can't request file permission — " + e.message, "error");
-                return;
+                // Either the prompt was dismissed or the browser never drew one —
+                // picking the file grants access inside the same click, so fall
+                // back to that.
+                throw syncAccessLost(e);
+            } finally {
+                clearTimeout(hint);
             }
             if (perm !== "granted") {
-                showSyncToast("Permission denied — click Sync and choose the file again.", "error");
-                return;
+                throw syncAccessLost();
             }
         }
 
         let fileResult;
         try {
-            fileResult = await readSyncFile(handle);
+            fileResult = await withSyncTimeout(readSyncFile(handle), "sync file", SYNC_TIMEOUTS.read);
         } catch (e) {
-            showSyncToast("Can't read sync file — " + e.message, "error");
-            return;
+            // A handle that never answers — stale, or a cloud placeholder that
+            // will not download — is recoverable by choosing the file again, and
+            // only autoSync can open that picker, so pass the reason up.
+            throw e.name === "TimeoutError" ? syncAccessLost(e) : e;
         }
 
         const { file, parsed, fileHasData, fileHasContent } = fileResult;
@@ -2685,7 +2748,7 @@ export default function App() {
                     await setSyncHandle(newHandle);
                     setSyncFileName(newHandle.name);
                     setSyncMeta({ fileName: newHandle.name });
-                    await syncWithHandle(newHandle, true);
+                    await withSyncTimeout(syncWithHandle(newHandle, true));
                 } catch (e) {
                     console.error("[Sync] could not connect to the chosen file:", e);
                     showSyncToast(`Couldn't sync with "${newHandle.name}" — ` + describeSyncError(e), "error");
@@ -2694,10 +2757,10 @@ export default function App() {
             };
 
             if (hasFSA) {
-                let handle = await getSyncHandle();
+                let handle = await withSyncTimeout(getSyncHandle(), "sync connection");
                 if (handle) {
                     try {
-                        await syncWithHandle(handle, false);
+                        await withSyncTimeout(syncWithHandle(handle, false));
                     } catch (e) {
                         console.error("[Sync] sync error with handle:", e);
                         const isHandleError = e.name === "NotFoundError" || e.name === "NotReadableError"
@@ -2708,7 +2771,7 @@ export default function App() {
                             } catch (clearError) {
                                 console.warn("[Sync] could not clear the stored handle:", clearError);
                             }
-                            await connectAndSync(`Connection to "${meta.fileName}" lost — please choose the file again.`, "warn");
+                            await connectAndSync(`The browser lost access to "${meta.fileName}" — it may be open in another app or still downloading. Choose it again.`, "warn");
                         } else {
                             showSyncToast("Sync failed: " + describeSyncError(e), "error");
                             setSyncStatus('error');
@@ -3662,7 +3725,7 @@ export default function App() {
                                         className="text-[10px] font-mono text-[#ab9df2] bg-[#ab9df2]/10 border border-[#ab9df2]/20 px-1.5 py-0.5 rounded cursor-pointer hover:bg-[#ab9df2]/20 hover:text-white transition-colors"
                                         title="View Changelog"
                                     >
-                                        v1.8
+                                        v1.8.1
                                     </span>
                                 </span>
                                 {currentClass && (
@@ -4444,6 +4507,16 @@ export default function App() {
                             <button onClick={closeModals} className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-500/10 transition-colors"><X size={20} /></button>
                         </div>
                         <div className="p-6 space-y-4 overflow-y-auto min-h-0">
+                            <div className="space-y-2">
+                                <div className="flex items-center justify-between">
+                                    <span className="text-sm font-bold text-[#a9dc76]">v1.8.1</span>
+                                    <span className="text-[10px] text-gray-500 font-mono">2026-11-24</span>
+                                </div>
+                                <ul className="list-disc pl-4 text-xs space-y-1 text-gray-600 dark:text-gray-400">
+                                    <li>Sync no longer waits forever on a browser that never shows the file-permission prompt — after a few seconds it asks you to choose the sync file again, which grants access in one click.</li>
+                                    <li>A sync file the browser can no longer open — moved, open in another app, or still downloading from the cloud — now asks you to choose it again instead of failing with a bare error.</li>
+                                </ul>
+                            </div>
                             <div className="space-y-2">
                                 <div className="flex items-center justify-between">
                                     <span className="text-sm font-bold text-[#a9dc76]">v1.8</span>
