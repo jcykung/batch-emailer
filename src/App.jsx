@@ -3,7 +3,7 @@ import {
     Folder, Book, Trash2, Edit2, Mail, Download, Upload, Plus,
     CheckSquare, Square, X, Archive, FileText, Check, AlertCircle,
     Copy, ExternalLink, RefreshCw, FolderOpen, MoreVertical,
-    ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Clock, History, Trash, Printer, FileSpreadsheet,
+    ChevronDown, ChevronLeft, ChevronRight, Clock, History, Trash, Printer, FileSpreadsheet,
     Sun, Moon, Sparkles, Coffee, AlertTriangle, CheckCircle2, Cloud, CloudOff,
     Pin, PinOff, FolderPlus
 } from 'lucide-react';
@@ -1154,7 +1154,8 @@ export default function App() {
     const [expandedPinnedFolders, setExpandedPinnedFolders] = useState({});
     const [showArchived, setShowArchived] = useState(false);
     const [sidebarOpen, setSidebarOpen] = useState(true);
-    const [expandedStudents, setExpandedStudents] = useState([]);
+    // Contact whose message history is open in the modal (null = closed).
+    const [historyModalStudentId, setHistoryModalStudentId] = useState(null);
     const [expandedEmailContacts, setExpandedEmailContacts] = useState([]);
     const [theme, setTheme] = useLocalStorage('batch-emailer-theme', 'dark', setStorageError); // Defaulting to dark
 
@@ -1561,6 +1562,7 @@ export default function App() {
     ], pinnedOrder);
     const currentClass = data.classes.find(c => c.id === activeClassId);
     const classStudents = data.students.filter(s => s.classId === activeClassId);
+    const historyStudent = data.students.find(s => s.id === historyModalStudentId) || null;
     // Contacts of the group browsed in the "Add from another group" picker.
     const copySourceStudents = copySourceClassId
         ? data.students.filter(s => s.classId === copySourceClassId)
@@ -1710,11 +1712,7 @@ export default function App() {
         });
     };
 
-    const toggleStudentHistory = (studentId) => {
-        setExpandedStudents(prev =>
-            prev.includes(studentId) ? prev.filter(id => id !== studentId) : [...prev, studentId]
-        );
-    };
+    const closeHistoryModal = () => setHistoryModalStudentId(null);
 
     const toggleEmailsExpanded = (studentId, e) => {
         e.stopPropagation();
@@ -1887,6 +1885,14 @@ export default function App() {
         };
     }, [contextMenu]);
 
+    // Close the message history modal on Escape (the backdrop handles clicks).
+    useEffect(() => {
+        if (!historyModalStudentId) return;
+        const onKeyDown = (e) => { if (e.key === 'Escape') setHistoryModalStudentId(null); };
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+    }, [historyModalStudentId]);
+
     // Keyboard shortcut: Delete key removes the currently selected contacts
     useEffect(() => {
         const onKeyDown = (e) => {
@@ -1894,14 +1900,14 @@ export default function App() {
             const el = e.target;
             const tag = el?.tagName;
             if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el?.isContentEditable) return;
-            if (customDialog.isOpen || Object.values(modals).some(Boolean)) return;
+            if (customDialog.isOpen || historyModalStudentId || Object.values(modals).some(Boolean)) return;
             if (!activeClassId || selectedStudents.length === 0) return;
             e.preventDefault();
             deleteStudents(selectedStudents);
         };
         window.addEventListener('keydown', onKeyDown);
         return () => window.removeEventListener('keydown', onKeyDown);
-    }, [selectedStudents, activeClassId, customDialog.isOpen, modals]);
+    }, [selectedStudents, activeClassId, customDialog.isOpen, historyModalStudentId, modals]);
 
     const deleteClass = (id) => {
         showConfirm("Delete Group", "Are you sure you want to delete this group? All contacts within it will be lost.", () => {
@@ -3725,7 +3731,7 @@ export default function App() {
                                         className="text-[10px] font-mono text-[#ab9df2] bg-[#ab9df2]/10 border border-[#ab9df2]/20 px-1.5 py-0.5 rounded cursor-pointer hover:bg-[#ab9df2]/20 hover:text-white transition-colors"
                                         title="View Changelog"
                                     >
-                                        v1.8.1
+                                        v1.8.2
                                     </span>
                                 </span>
                                 {currentClass && (
@@ -3952,7 +3958,6 @@ export default function App() {
                                         const missingEmail = cleanEmails.length === 0;
 
                                         const historyCount = student.emailHistory?.length || 0;
-                                        const isHistoryExpanded = expandedStudents.includes(student.id);
                                         const lastLog = student.emailHistory?.[0] || null;
 
                                         const isEmailsExpanded = expandedEmailContacts.includes(student.id);
@@ -3983,13 +3988,12 @@ export default function App() {
                                                         <div className={`font-bold transition-colors duration-300 ${themeClasses.textPrimary}`}>{student.name}</div>
                                                         {historyCount > 0 && (
                                                             <button
-                                                                onClick={() => toggleStudentHistory(student.id)}
+                                                                onClick={(e) => { e.stopPropagation(); setHistoryModalStudentId(student.id); }}
                                                                 className={`inline-flex items-center gap-1.5 text-[11px] font-bold mt-1.5 px-2.5 py-0.5 rounded-full transition-all active:scale-95 shadow-sm ${isDark ? 'bg-[#ab9df2]/15 text-[#ab9df2] hover:bg-[#ab9df2]/25' : 'bg-[#ab9df2]/20 text-[#5c4cb0] hover:bg-[#ab9df2]/30'
                                                                     }`}
                                                             >
                                                                 <History size={12} />
-                                                                {isHistoryExpanded ? 'Hide History' : `Show History (${historyCount})`}
-                                                                {isHistoryExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                                                                Message History ({historyCount})
                                                             </button>
                                                         )}
                                                     </td>
@@ -4050,46 +4054,6 @@ export default function App() {
                                                     </td>
                                                 </tr>
 
-                                                {/* Expandable History Detail Row */}
-                                                {isHistoryExpanded && historyCount > 0 && (
-                                                    <tr className="animate-in fade-in slide-in-from-top-1 duration-200">
-                                                        <td colSpan="7" className={`p-4 border-t border-b transition-colors duration-300 ${isDark ? 'bg-[#221f22]/60 border-[#4a474a]/50' : 'bg-[#e1d5e3]/15 border-[#e1d5e3]/60'}`}>
-                                                            <div className="pl-4 md:pl-12 pr-2 md:pr-6">
-                                                                <h4 className={`text-xs font-extrabold uppercase tracking-wider mb-3 flex items-center gap-1.5 ${isDark ? 'text-[#ab9df2]' : 'text-[#5c4cb0]'}`}>
-                                                                    <Clock size={12} /> Communication Log for {student.name}
-                                                                </h4>
-                                                                <div className="space-y-3 max-h-60 overflow-y-auto pr-2">
-                                                                    {student.emailHistory.map((log, index) => (
-                                                                        <div key={log.id || index} className={`border rounded-xl p-3 shadow-xs relative group/log transition-all duration-300 hover:shadow-sm ${isDark ? 'bg-[#3a373a] border-[#4a474a]' : 'bg-white border-[#e1d5e3]'
-                                                                            }`}>
-                                                                            <div className="flex justify-between items-start mb-1 text-xs text-gray-400">
-                                                                                <span className={`font-bold ${isDark ? 'text-[#939293]' : 'text-[#726f73]'}`}>{formatDate(log.timestamp)}</span>
-                                                                                <div className="flex items-center gap-2">
-                                                                                    {index === 0 && <span className={`text-[10px] font-bold border px-2 py-0.5 rounded-full ${isDark ? 'bg-[#a9dc76]/10 text-[#a9dc76] border-[#a9dc76]/30' : 'bg-[#3f7a1a]/10 text-[#3f7a1a] border-[#3f7a1a]/20'}`}>Latest</span>}
-                                                                                    <button
-                                                                                        onClick={() => deleteHistoryEntry(student.id, log.id)}
-                                                                                        className="opacity-0 group-hover/log:opacity-100 text-[#ff6188] hover:text-[#ff3864] p-0.5 rounded transition-opacity"
-                                                                                        title="Delete log entry"
-                                                                                    >
-                                                                                        <Trash2 size={13} />
-                                                                                    </button>
-                                                                                </div>
-                                                                            </div>
-                                                                            {log.subject && (
-                                                                                <p className={`text-sm font-bold mb-1 select-all transition-colors duration-300 ${isDark ? 'text-[#78dce8]' : 'text-[#00838f]'}`}>
-                                                                                    Subject: {log.subject}
-                                                                                </p>
-                                                                            )}
-                                                                            <p className={`text-sm whitespace-pre-wrap leading-relaxed select-all transition-colors duration-300 ${themeClasses.textPrimary}`}>
-                                                                                {log.message}
-                                                                            </p>
-                                                                        </div>
-                                                                    ))}
-                                                                </div>
-                                                            </div>
-                                                        </td>
-                                                    </tr>
-                                                )}
                                             </React.Fragment>
                                         );
                                     })}
@@ -4121,6 +4085,81 @@ export default function App() {
             </div>
 
             {/* --- MODALS --- */}
+
+            {/* Message History Modal - Tall, narrow, centred; closable via X, Escape, or backdrop */}
+            {historyStudent && (
+                <div
+                    className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4 backdrop-blur-xs"
+                    onClick={closeHistoryModal}
+                >
+                    <div
+                        className={`rounded-2xl shadow-xl w-[92vw] md:w-1/2 h-[85vh] flex flex-col overflow-hidden border animate-in fade-in zoom-in-95 duration-200 ${themeClasses.cardBg}`}
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="p-4 border-b flex justify-between items-start gap-3 bg-gray-50/5">
+                            <div className="min-w-0">
+                                <h3 className={`font-bold text-lg flex items-center gap-2 ${isDark ? 'text-[#ab9df2]' : 'text-[#5c4cb0]'}`}>
+                                    <Clock size={18} /> {historyStudent.name}
+                                </h3>
+                                <div className="flex flex-wrap gap-1 mt-1.5">
+                                    {(historyStudent.emails || []).filter(Boolean).length === 0 ? (
+                                        <span className="text-xs italic text-gray-400">No email addresses</span>
+                                    ) : (
+                                        (historyStudent.emails || []).filter(Boolean).map((email, idx) => (
+                                            <span
+                                                key={idx}
+                                                className={`truncate px-2 py-0.5 rounded text-xs select-all border font-bold max-w-[220px] ${isDark ? 'bg-zinc-800 text-zinc-300 border-zinc-700' : 'bg-[#f2ece0]/50 text-gray-750 border-gray-350'}`}
+                                                title={email}
+                                            >
+                                                {email}
+                                            </span>
+                                        ))
+                                    )}
+                                </div>
+                            </div>
+                            <button
+                                onClick={closeHistoryModal}
+                                title="Close message history"
+                                aria-label="Close message history"
+                                className="shrink-0 text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-500/10 transition-colors"
+                            >
+                                <X size={20} />
+                            </button>
+                        </div>
+                        <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                            {(historyStudent.emailHistory || []).length === 0 ? (
+                                <p className="text-sm italic text-gray-400 text-center py-6">No messages logged</p>
+                            ) : (
+                                historyStudent.emailHistory.map((log, index) => (
+                                    <div key={log.id || index} className={`border rounded-xl p-3 shadow-xs relative transition-all duration-300 hover:shadow-sm ${isDark ? 'bg-[#3a373a] border-[#4a474a]' : 'bg-white border-[#e1d5e3]'}`}>
+                                        <div className="flex justify-between items-start mb-1 text-xs text-gray-400">
+                                            <span className={`font-bold ${isDark ? 'text-[#939293]' : 'text-[#726f73]'}`}>{formatDate(log.timestamp)}</span>
+                                            <div className="flex items-center gap-2">
+                                                {index === 0 && <span className={`text-[10px] font-bold border px-2 py-0.5 rounded-full ${isDark ? 'bg-[#a9dc76]/10 text-[#a9dc76] border-[#a9dc76]/30' : 'bg-[#3f7a1a]/10 text-[#3f7a1a] border-[#3f7a1a]/20'}`}>Latest</span>}
+                                                <button
+                                                    onClick={() => deleteHistoryEntry(historyStudent.id, log.id)}
+                                                    className="opacity-60 hover:opacity-100 text-[#ff6188] hover:text-[#ff3864] p-0.5 rounded transition-opacity"
+                                                    title="Delete log entry"
+                                                >
+                                                    <Trash2 size={13} />
+                                                </button>
+                                            </div>
+                                        </div>
+                                        {log.subject && (
+                                            <p className={`text-sm font-bold mb-1 select-all transition-colors duration-300 ${isDark ? 'text-[#78dce8]' : 'text-[#00838f]'}`}>
+                                                Subject: {log.subject}
+                                            </p>
+                                        )}
+                                        <p className={`text-sm whitespace-pre-wrap leading-relaxed select-all transition-colors duration-300 ${themeClasses.textPrimary}`}>
+                                            {log.message}
+                                        </p>
+                                    </div>
+                                ))
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* Folder Modal - Rose Pink Header Accent */}
             {modals.folder && (
@@ -4507,6 +4546,15 @@ export default function App() {
                             <button onClick={closeModals} className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-500/10 transition-colors"><X size={20} /></button>
                         </div>
                         <div className="p-6 space-y-4 overflow-y-auto min-h-0">
+                            <div className="space-y-2">
+                                <div className="flex items-center justify-between">
+                                    <span className="text-sm font-bold text-[#a9dc76]">v1.8.2</span>
+                                    <span className="text-[10px] text-gray-500 font-mono">2026-11-24</span>
+                                </div>
+                                <ul className="list-disc pl-4 text-xs space-y-1 text-gray-600 dark:text-gray-400">
+                                    <li><strong>Message History</strong>: the old "Show History" link under a contact's name now opens a tall, narrow, centred window showing the person's name and email addresses in the header, instead of unfolding inside the table. Close it with the X, <strong>Escape</strong>, or by clicking outside the window; deleting individual log entries works the same.</li>
+                                </ul>
+                            </div>
                             <div className="space-y-2">
                                 <div className="flex items-center justify-between">
                                     <span className="text-sm font-bold text-[#a9dc76]">v1.8.1</span>
