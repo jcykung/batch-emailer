@@ -4126,7 +4126,7 @@ export default function App() {
                                 <X size={20} />
                             </button>
                         </div>
-                        <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                        <div className={`flex-1 overflow-y-auto p-4 space-y-3 ${isDark ? 'bg-[#2d2a2e]' : 'bg-[#f2ece0]'}`}>
                             {(historyStudent.emailHistory || []).length === 0 ? (
                                 <p className="text-sm italic text-gray-400 text-center py-6">No messages logged</p>
                             ) : (
